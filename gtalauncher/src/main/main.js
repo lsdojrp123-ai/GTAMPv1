@@ -27,14 +27,23 @@ let hookClient = null;
 let hookConnected = false;
 
 // ============================================================
-// Built-in hook TCP server (port 22100)
-// Always available so the DLL can connect even if client-bridge.js fails.
-// Provides solo TestBot netPed stream for Phase 6 playtest.
+// Built-in multiplayer relay (port 22100) — FiveM-style glue
+// Hook DLL <-> this process <-> FXServer UDP
+// Solo TestBot if no other players after a few seconds.
 // ============================================================
+const dgram = require('dgram');
+
 let hookTcpServer = null;
 const hookSockets = new Set();
 let soloBotTimer = null;
 let lastHookPos = { x: 0, y: 0, z: 72, h: 0 };
+let mpUdp = null;
+let mpServer = { host: '127.0.0.1', port: 22005 };
+let mpNetId = null;
+let mpSpawned = false;
+let mpNick = 'Player';
+let mpRemote = new Map(); // netId -> {name,model,pos,h,health}
+let mpGotOtherPlayer = false;
 
 function hookBroadcast(obj) {
   const line = JSON.stringify(obj) + '\n';
@@ -43,43 +52,233 @@ function hookBroadcast(obj) {
   }
 }
 
+function mpSend(obj) {
+  if (!mpUdp) return;
+  try {
+    const buf = Buffer.from(JSON.stringify(obj) + '\n');
+    mpUdp.send(buf, mpServer.port, mpServer.host);
+  } catch (e) {
+    writeLaunchDiag(['mpSend error: ' + e.message]);
+  }
+}
+
+function hookSpawnRemotePlayer(p) {
+  if (!p || p.netId == null) return;
+  if (mpNetId != null && Number(p.netId) === Number(mpNetId)) return;
+  const pos = p.pos || { x: 0, y: 0, z: 72 };
+  const model = p.model || 's_m_y_cop_01';
+  hookBroadcast({
+    t: 'netPed',
+    id: 'p' + p.netId,
+    netId: p.netId,
+    name: p.name || ('Player' + p.netId),
+    model,
+    x: +pos.x || 0, y: +pos.y || 0, z: +pos.z || 72,
+    h: p.h || 0,
+    health: p.health ?? 200
+  });
+  writeLaunchDiag(['remote JOIN #' + p.netId + ' ' + (p.name || '') + ' model=' + model]);
+}
+
+function hookMoveRemotePlayer(p) {
+  if (!p || p.netId == null) return;
+  if (mpNetId != null && Number(p.netId) === Number(mpNetId)) return;
+  const pos = p.pos || { x: 0, y: 0, z: 72 };
+  hookBroadcast({
+    t: 'netPedPos',
+    id: 'p' + p.netId,
+    netId: p.netId,
+    name: p.name || ('Player' + p.netId),
+    model: p.model || 's_m_y_cop_01',
+    x: +pos.x || 0, y: +pos.y || 0, z: +pos.z || 72,
+    h: p.h || 0,
+    health: p.health ?? 200
+  });
+}
+
+function hookDeleteRemotePlayer(netId) {
+  if (netId == null) return;
+  if (mpNetId != null && Number(netId) === Number(mpNetId)) return;
+  hookBroadcast({ t: 'netPedDel', id: 'p' + netId });
+  writeLaunchDiag(['remote LEAVE #' + netId]);
+}
+
+function stopSoloBot() {
+  if (soloBotTimer) { clearInterval(soloBotTimer); soloBotTimer = null; }
+}
+
 function startSoloBot() {
   if (soloBotTimer) return;
-  // Wait until hook has sent a real world position (not 0,0)
+  if (mpGotOtherPlayer) return; // real players present — no fake bot
   const okPos = (Math.abs(lastHookPos.x) > 1 || Math.abs(lastHookPos.y) > 1) && lastHookPos.z > 1;
-  if (!okPos) {
-    writeLaunchDiag(['solo TestBot deferred — waiting for player pos, have ' + JSON.stringify(lastHookPos)]);
-    return;
-  }
-  writeLaunchDiag(['solo TestBot stream starting near ' + lastHookPos.x.toFixed(1) + ',' + lastHookPos.y.toFixed(1)]);
+  if (!okPos) return;
+  writeLaunchDiag(['solo TestBot near ' + lastHookPos.x.toFixed(1) + ',' + lastHookPos.y.toFixed(1)]);
   let ang = 0;
-  let sentSpawn = false;
-  const sendSpawn = () => {
-    const sx = lastHookPos.x + Math.cos(0) * 5;
-    const sy = lastHookPos.y + Math.sin(0) * 5;
-    const sz = lastHookPos.z;
-    // cop model = reliable spawn; freemode often needs wardrobe setup
+  const pushSpawn = () => {
     hookBroadcast({
       t: 'netPed', id: 'p9001', name: 'TestBot', model: 's_m_y_cop_01',
-      x: sx, y: sy, z: sz, h: lastHookPos.h || 0, health: 200, netId: 9001
+      x: lastHookPos.x + 5, y: lastHookPos.y, z: lastHookPos.z,
+      h: lastHookPos.h || 0, health: 200, netId: 9001
     });
-    sentSpawn = true;
-    writeLaunchDiag(['solo TestBot netPed spawn sent']);
   };
-  sendSpawn();
+  pushSpawn();
   soloBotTimer = setInterval(() => {
-    if (!sentSpawn) sendSpawn();
+    if (mpGotOtherPlayer) { stopSoloBot(); hookDeleteRemotePlayer(9001); return; }
     ang += 0.05;
     const x = lastHookPos.x + Math.cos(ang) * 5;
     const y = lastHookPos.y + Math.sin(ang) * 5;
-    const z = lastHookPos.z;
-    let h = ang * 180 / Math.PI + 90;
-    h = ((h % 360) + 360) % 360;
+    let h = ((ang * 180 / Math.PI + 90) % 360 + 360) % 360;
     hookBroadcast({
       t: 'netPedPos', id: 'p9001', name: 'TestBot', model: 's_m_y_cop_01',
-      x, y, z, h, health: 200, netId: 9001
+      x, y, z: lastHookPos.z, h, health: 200, netId: 9001
     });
   }, 66);
+}
+
+function handleServerPacket(pkt) {
+  if (!pkt || !pkt.t) return;
+  switch (pkt.t) {
+    case 'welcome': {
+      mpNetId = pkt.netId;
+      writeLaunchDiag(['MP WELCOME netId=' + mpNetId + ' server=' + (pkt.server && pkt.server.name)]);
+      // Minimal client: ack resources immediately so server finalizes spawn
+      mpSend({ t: 'resourceAck' });
+      break;
+    }
+    case 'spawn': {
+      mpSpawned = true;
+      if (pkt.pos) {
+        // Don't force local player coords — hook owns real pos. Just mark spawned.
+      }
+      mpSend({ t: 'spawnComplete', model: (pkt.model || 'mp_m_freemode_01') });
+      writeLaunchDiag(['MP SPAWN ok — streaming positions to server']);
+      // Resync any remotes we already know
+      for (const p of mpRemote.values()) hookSpawnRemotePlayer(p);
+      // If alone, TestBot after short delay
+      setTimeout(() => { if (!mpGotOtherPlayer) startSoloBot(); }, 4000);
+      break;
+    }
+    case 'playerJoin': {
+      if (mpNetId != null && Number(pkt.netId) === Number(mpNetId)) break;
+      mpGotOtherPlayer = true;
+      stopSoloBot();
+      hookDeleteRemotePlayer(9001);
+      const p = {
+        netId: pkt.netId,
+        name: pkt.name || ('Player' + pkt.netId),
+        pos: pkt.pos || { x: 0, y: 0, z: 72 },
+        h: pkt.h || 0,
+        health: pkt.health ?? 200,
+        model: pkt.model || 's_m_y_cop_01'
+      };
+      mpRemote.set(pkt.netId, p);
+      hookSpawnRemotePlayer(p);
+      hookBroadcast({ t: 'chat', name: 'JOIN', msg: p.name + ' joined' });
+      break;
+    }
+    case 'playerLeft':
+    case 'playerQuit': {
+      mpRemote.delete(pkt.netId);
+      hookDeleteRemotePlayer(pkt.netId);
+      hookBroadcast({ t: 'chat', name: 'LEAVE', msg: (pkt.name || ('#' + pkt.netId)) + ' left' });
+      if (mpRemote.size === 0) {
+        mpGotOtherPlayer = false;
+        setTimeout(() => startSoloBot(), 2000);
+      }
+      break;
+    }
+    case 'playerPos': {
+      if (mpNetId != null && Number(pkt.netId) === Number(mpNetId)) break;
+      mpGotOtherPlayer = true;
+      stopSoloBot();
+      let p = mpRemote.get(pkt.netId);
+      if (!p) {
+        p = {
+          netId: pkt.netId,
+          name: pkt.name || ('Player' + pkt.netId),
+          pos: { x: pkt.x, y: pkt.y, z: pkt.z },
+          h: pkt.h || 0,
+          health: pkt.health ?? 200,
+          model: pkt.model || 's_m_y_cop_01'
+        };
+        mpRemote.set(pkt.netId, p);
+        hookSpawnRemotePlayer(p);
+      } else {
+        p.pos = { x: pkt.x, y: pkt.y, z: pkt.z };
+        p.h = pkt.h || 0;
+        if (pkt.model) p.model = pkt.model;
+        if (pkt.name) p.name = pkt.name;
+        if (pkt.health != null) p.health = pkt.health;
+        hookMoveRemotePlayer(p);
+      }
+      break;
+    }
+    case 'chat': {
+      hookBroadcast({ t: 'chat', name: pkt.name || 'SERVER', msg: pkt.msg || '', netId: pkt.netId || 0 });
+      break;
+    }
+    case 'spawnPed': {
+      hookBroadcast({
+        t: 'spawnPed', src: 'SRV', model: pkt.model || 's_m_y_cop_01',
+        x: pkt.x, y: pkt.y, z: pkt.z, h: pkt.h,
+        offset: pkt.offset !== false, pedType: pkt.pedType || 6
+      });
+      break;
+    }
+    case 'kick': {
+      writeLaunchDiag(['MP KICKED: ' + (pkt.reason || '')]);
+      hookBroadcast({ t: 'chat', name: 'SERVER', msg: 'Kicked: ' + (pkt.reason || '') });
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+function ensureMpUdp(serverAddr) {
+  // serverAddr like 127.0.0.1:22005
+  let host = '127.0.0.1', port = 22005;
+  if (serverAddr && String(serverAddr).includes(':')) {
+    const [h, ps] = String(serverAddr).split(':');
+    host = h || host;
+    port = parseInt(ps, 10) || port;
+  }
+  mpServer = { host, port };
+  mpNick = (config && config.nickname) || 'Player';
+
+  if (mpUdp) {
+    try { mpUdp.close(); } catch {}
+    mpUdp = null;
+  }
+  mpNetId = null;
+  mpSpawned = false;
+  mpRemote.clear();
+  mpGotOtherPlayer = false;
+  stopSoloBot();
+
+  mpUdp = dgram.createSocket('udp4');
+  mpUdp.on('message', (buf) => {
+    let data = buf;
+    // strip reliable header if present (0x02 ...)
+    if (buf.length >= 6 && buf[0] === 0x02) {
+      data = buf.slice(6);
+      try {
+        const seq = buf.readUInt32BE(2);
+        mpSend({ t: 'ack', seq });
+      } catch {}
+    }
+    let pkt;
+    try { pkt = JSON.parse(data.toString('utf8').trim()); } catch { return; }
+    handleServerPacket(pkt);
+  });
+  mpUdp.on('error', (e) => writeLaunchDiag(['MP UDP error: ' + e.message]));
+  mpUdp.bind(() => {
+    writeLaunchDiag(['MP UDP bound, joining ' + host + ':' + port + ' as ' + mpNick]);
+    mpSend({ t: 'join', nick: mpNick });
+    // keepalive
+    if (ensureMpUdp._ping) clearInterval(ensureMpUdp._ping);
+    ensureMpUdp._ping = setInterval(() => mpSend({ t: 'ping', ts: Date.now() }), 2000);
+  });
 }
 
 function ensureHookTcpServer() {
@@ -98,24 +297,36 @@ function ensureHookTcpServer() {
           if (!l.trim()) continue;
           let m; try { m = JSON.parse(l); } catch { continue; }
           if (m.t === 'hookHello') {
-            writeLaunchDiag(['hookHello v=' + (m.v||'?') + ' gta=' + (m.gta||'?')]);
+            writeLaunchDiag(['hookHello v=' + (m.v || '?') + ' gta=' + (m.gta || '?')]);
           } else if (m.t === 'ready') {
             writeLaunchDiag(['hook SHV ready ped=' + m.ped]);
-            // Bot starts on first real pos after ready (see pos handler)
-            setTimeout(() => startSoloBot(), 500);
+            // Resync all known remotes into the game now that natives work
+            for (const p of mpRemote.values()) hookSpawnRemotePlayer(p);
+            setTimeout(() => { if (!mpGotOtherPlayer) startSoloBot(); }, 2000);
           } else if (m.t === 'pos') {
             if (typeof m.x === 'number') {
-              lastHookPos.x = m.x; lastHookPos.y = m.y; lastHookPos.z = m.z;
-              lastHookPos.h = m.h || 0;
+              lastHookPos = { x: m.x, y: m.y, z: m.z, h: m.h || 0 };
             }
-            // Start / retry bot once we have real world coords
-            startSoloBot();
+            // Stream to game server when spawned
+            if (mpSpawned && typeof m.x === 'number') {
+              mpSend({
+                t: 'pos',
+                x: m.x, y: m.y, z: m.z, h: m.h || 0,
+                vx: 0, vy: 0, vz: 0,
+                health: 200,
+                model: 'mp_m_freemode_01'
+              });
+            }
+            if (!mpGotOtherPlayer) startSoloBot();
           } else if (m.t === 'chat') {
             const raw = (m.msg || '').toString().trim();
-            const cmd = raw.replace(/^\//, '').split(/\s+/)[0].toLowerCase();
+            const body = raw.startsWith('/') ? raw.slice(1) : raw;
+            const parts = body.split(/\s+/).filter(Boolean);
+            const cmd = (parts[0] || '').toLowerCase();
             if (cmd === 'spawncop' || cmd === 'spawn') {
-              hookBroadcast({ t: 'spawnPed', src: 'CMD', model: 's_m_y_cop_01', offset: true, pedType: 6 });
-              writeLaunchDiag(['built-in handled cmd ' + cmd]);
+              hookBroadcast({ t: 'spawnPed', src: 'CMD', model: parts[1] || 's_m_y_cop_01', offset: true, pedType: 6 });
+            } else {
+              mpSend({ t: 'chat', msg: raw });
             }
           } else if (m.t === 'spawn') {
             writeLaunchDiag(['hook spawn ack ped=' + m.ped + ' ok=' + m.ok]);
@@ -129,18 +340,17 @@ function ensureHookTcpServer() {
       socket.on('error', () => hookSockets.delete(socket));
     });
     hookTcpServer.on('error', (e) => {
-      writeLaunchDiag(['hook TCP server error: ' + e.message + ' (bridge may already own 22100)']);
+      writeLaunchDiag(['hook TCP server error: ' + e.message]);
       hookTcpServer = null;
     });
     hookTcpServer.listen(22100, '127.0.0.1', () => {
-      writeLaunchDiag(['built-in hook TCP listening 127.0.0.1:22100']);
-      console.log('[Main] built-in hook TCP on 127.0.0.1:22100');
+      writeLaunchDiag(['built-in MP relay listening 127.0.0.1:22100']);
+      console.log('[Main] built-in MP relay on 127.0.0.1:22100');
     });
   } catch (e) {
     writeLaunchDiag(['ensureHookTcpServer failed: ' + e.message]);
   }
 }
-
 
 // hostedServers already declared above (line 13) — do NOT redeclare
 
@@ -479,8 +689,14 @@ ipcMain.handle('game:launch', (_e, {serverAddr} = {}) => {
   const platformUrl = fxServerInfo?.platformUrl || 'http://127.0.0.1:22003';
   const effectiveAddr = serverAddr || `${host}:${gamePort}`;
 
-  // Built-in hook TCP on 22100: TestBot + spawncop (no external bridge required)
+  // Built-in MP relay: hook TCP 22100 + UDP join to FX server
   try { ensureHookTcpServer(); } catch (e) { writeLaunchDiag(['ensureHookTcpServer: ' + e.message]); }
+  try {
+    ensureMpUdp(effectiveAddr);
+    writeLaunchDiag(['MP join scheduled -> ' + effectiveAddr + ' nick=' + (config.nickname || 'Player')]);
+  } catch (e) {
+    writeLaunchDiag(['ensureMpUdp failed: ' + e.message]);
+  }
 
 
   if (process.platform !== 'win32') {
