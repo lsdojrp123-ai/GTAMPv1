@@ -5,6 +5,7 @@ const fs = require('fs');
 const { spawn } = require('child_process');
 const os = require('os');
 const net = require('net');
+const discordRpc = require('./discord-rpc');
 function writeLaunchDiag(lines) {
   try {
     const text = lines.join('\n') + '\n';
@@ -152,6 +153,13 @@ function handleServerPacket(pkt) {
       }
       mpSend({ t: 'spawnComplete', model: (pkt.model || 'mp_m_freemode_01') });
       writeLaunchDiag(['MP SPAWN ok — streaming positions to server']);
+      try {
+        discordRpc.setInGame(
+          'GTAMP Server',
+          (mpServer.host + ':' + mpServer.port),
+          mpRemote.size + 1
+        );
+      } catch {}
       // Resync any remotes we already know
       for (const p of mpRemote.values()) hookSpawnRemotePlayer(p);
       // If alone, TestBot after short delay
@@ -174,6 +182,9 @@ function handleServerPacket(pkt) {
       mpRemote.set(pkt.netId, p);
       hookSpawnRemotePlayer(p);
       hookBroadcast({ t: 'chat', name: 'JOIN', msg: p.name + ' joined' });
+      try {
+        discordRpc.setInGame('GTAMP Server', mpServer.host + ':' + mpServer.port, mpRemote.size + 1);
+      } catch {}
       break;
     }
     case 'playerLeft':
@@ -407,6 +418,7 @@ const defaultConfig = {
   windowed: false,
   fullscreenBorderless: true,
   discordRpc: true,
+  discordAppId: '', // Discord Developer Portal Application ID
   voiceEnabled: true,
   ptt: true,
   voiceVolume: 70,
@@ -693,6 +705,15 @@ function createWindow() {
 // ---------- Lifecycle ----------
 app.whenReady().then(async () => {
   try { ensureHookTcpServer(); } catch (e) { console.error(e); }
+  // Discord Rich Presence (Playing GTAMP)
+  try {
+    const dr = discordRpc.start({
+      enabled: config.discordRpc !== false,
+      clientId: config.discordAppId || process.env.GTAMP_DISCORD_APP_ID || ''
+    });
+    if (dr.ok) discordRpc.setInLauncher();
+    else writeLaunchDiag(['Discord RPC: ' + (dr.error || 'off') + ' — set Discord App ID in Settings']);
+  } catch (e) { console.error('[Main] discord rpc', e); }
   ensureDataDirs();
   if (!config.gtaPath) {
     try { const d = await detectGTAPath(); if (d) { config.gtaPath = d; saveConfig(config); } } catch {}
@@ -715,6 +736,7 @@ Menu.setApplicationMenu(null);
 
 function cleanup() {
   try { if (bridgeProc && !bridgeProc.killed) bridgeProc.kill(); } catch {}
+  try { discordRpc.stop(); } catch {}
 }
 
 // ---------- IPC ----------
@@ -726,7 +748,21 @@ ipcMain.handle('window:maximize', () => {
 ipcMain.handle('window:close', () => mainWindow?.close());
 
 ipcMain.handle('config:get', () => config);
-ipcMain.handle('config:set', (_e,p) => { config = {...config, ...p}; saveConfig(config); return config; });
+ipcMain.handle('config:set', (_e,p) => {
+  config = {...config, ...p};
+  saveConfig(config);
+  // Refresh Discord RPC if toggled / app id changed
+  try {
+    if (p && ('discordRpc' in p || 'discordAppId' in p)) {
+      discordRpc.stop();
+      if (config.discordRpc !== false) {
+        discordRpc.start({ enabled: true, clientId: config.discordAppId || process.env.GTAMP_DISCORD_APP_ID || '' });
+        discordRpc.setInLauncher();
+      }
+    }
+  } catch {}
+  return config;
+});
 ipcMain.handle('config:reset', () => {
   try { if (fs.existsSync(configPath)) fs.unlinkSync(configPath); } catch {}
   config = loadConfig();
@@ -845,6 +881,9 @@ ipcMain.handle('game:launch', (_e, {serverAddr} = {}) => {
   try {
     ensureMpUdp(effectiveAddr);
     writeLaunchDiag(['MP join scheduled -> ' + effectiveAddr + ' nick=' + (config.nickname || 'Player')]);
+    try {
+      discordRpc.setConnecting(serverAddr || 'Local GTAMP', effectiveAddr);
+    } catch {}
   } catch (e) {
     writeLaunchDiag(['ensureMpUdp failed: ' + e.message]);
   }
@@ -1035,3 +1074,5 @@ ipcMain.handle('hook:send', (_e, obj) => {
   catch(e) { return {ok:false, error:e.message}; }
 });
 ipcMain.handle('hook:status', () => ({ connected: hookConnected }));
+ipcMain.handle('discord:status', () => discordRpc.status());
+ipcMain.handle('discord:set', (_e, partial) => { try { discordRpc.setPresence(partial || {}); return { ok:true }; } catch(e){ return { ok:false, error:e.message }; } });

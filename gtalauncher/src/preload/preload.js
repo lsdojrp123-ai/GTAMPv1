@@ -44,12 +44,16 @@ contextBridge.exposeInMainWorld('gtamp', {
     quit: () => ipcRenderer.invoke('app:quit'),
     relaunch: () => ipcRenderer.invoke('app:relaunch')
   },
+  discord: {
+    status: () => ipcRenderer.invoke('discord:status'),
+    set: (p) => ipcRenderer.invoke('discord:set', p)
+  },
   hook: {
     status: () => ipcRenderer.invoke('hook:status'),
     send: (obj) => ipcRenderer.invoke('hook:send', obj)
   },
   on: (channel, cb) => {
-    const allowed = ['game:status','master:update','server:info','hook:status','hook:event'];
-    if (allowed.includes(channel)) ipcRenderer.on(channel, (_e,...a)=>cb(...a));
+    const allowed = ['game:status', 'master:update', 'server:info', 'hook:status', 'hook:event'];
+    if (allowed.includes(channel)) ipcRenderer.on(channel, (_e, ...a) => cb(...a));
   }
 });

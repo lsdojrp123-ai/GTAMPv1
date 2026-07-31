@@ -135,6 +135,8 @@ async function init() {
   setVal('settings-launcher', state.config.launcherType||'auto');
   setCheck('settings-windowed', !!state.config.windowed);
   setCheck('settings-voice', state.config.voiceEnabled!==false);
+  setCheck('settings-discord', state.config.discordRpc!==false);
+  setVal('settings-discord-appid', state.config.discordAppId||'');
   setCheck('settings-autoconnect', !!state.config.autoConnect);
   const vl = document.getElementById('vol-label'); if (vl) vl.textContent = state.config.volume??80;
   const np = document.getElementById('nick-pill'); if (np) np.textContent = state.config.nickname||'Player';
@@ -566,9 +568,19 @@ async function saveSettings() {
   state.config.volume = parseInt(document.getElementById('vol-master')?.value||'80');
   state.config.windowed = !!document.getElementById('settings-windowed')?.checked;
   state.config.voiceEnabled = !!document.getElementById('settings-voice')?.checked;
+  state.config.discordRpc = !!document.getElementById('settings-discord')?.checked;
+  state.config.discordAppId = (document.getElementById('settings-discord-appid')?.value || '').trim();
   state.config.autoConnect = !!document.getElementById('settings-autoconnect')?.checked;
   try {
     await window.gtamp.config.set(state.config);
+    try {
+      const ds = await window.gtamp.discord.status();
+      if (state.config.discordRpc && !ds.hasClientId) {
+        toast('Saved. Add Discord Application ID for Rich Presence.','warn');
+      } else if (state.config.discordRpc && ds.ready) {
+        toast('Saved. Discord status: connected.','ok');
+      }
+    } catch {}
     const np=document.getElementById('nick-pill'); if(np)np.textContent=state.config.nickname;
     const bn=document.getElementById('bb-nick'); if(bn)bn.textContent=state.config.nickname;
     const bp=document.getElementById('bb-platform'); if(bp)bp.textContent='Platform: '+state.config.launcherType;
