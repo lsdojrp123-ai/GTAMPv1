@@ -234,23 +234,21 @@ static void deleteNetPed_SHV(NetPed*np, bool hard=true){
 static int addPlayerBlip_SHV(int ped, const char* name){
     using namespace shv;
     if(!ped) return 0;
+    // Only use stable blip natives. Blip-name text commands used a bad hash
+    // (0xF9113A30F2C16B2A) that crashes SHV with "Can't find native".
+    // Player names already show via drawNametags().
     const uint64_t H_ADD_BLIP = 0x5CDE92C702A8FCE7ULL; // ADD_BLIP_FOR_ENTITY
     const uint64_t H_SET_BLIP_SPRITE = 0xDF735600A4696DAFULL;
     const uint64_t H_SET_BLIP_COLOUR = 0x03D7FB09E75D6B7EULL;
     const uint64_t H_SET_BLIP_SCALE = 0xD38744167B2FA257ULL;
     const uint64_t H_SET_BLIP_AS_SHORT_RANGE = 0xBE8BE4FE60E27B72ULL;
-    const uint64_t H_BEGIN_TEXT = 0xF9113A30F2C16B2AULL; // BEGIN_TEXT_COMMAND_SET_BLIP_NAME
-    const uint64_t H_ADD_TEXT = 0x6C188BE134E074AAULL;   // ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME
-    const uint64_t H_END_TEXT = 0xBC38B49BCB83BC9BULL;   // END_TEXT_COMMAND_SET_BLIP_NAME
     int blip = Invoker(H_ADD_BLIP).argi(ped).reti();
     if(!blip) return 0;
-    Invoker(H_SET_BLIP_SPRITE).argi(blip).argi(1).retv(); // standard circle
+    Invoker(H_SET_BLIP_SPRITE).argi(blip).argi(1).retv(); // circle
     Invoker(H_SET_BLIP_COLOUR).argi(blip).argi(0).retv(); // white
     Invoker(H_SET_BLIP_SCALE).argi(blip).argf(0.85f).retv();
     Invoker(H_SET_BLIP_AS_SHORT_RANGE).argi(blip).argb(false).retv();
-    Invoker(H_BEGIN_TEXT).argp((void*)"STRING").retv();
-    Invoker(H_ADD_TEXT).argp((void*)(name && name[0] ? name : "Player")).retv();
-    Invoker(H_END_TEXT).argi(blip).retv();
+    (void)name;
     return blip;
 }
 static int doSpawnPed(const char*modelName,float x,float y,float z,float h,int pedType,bool freeze=false,const char*tag=NULL){
