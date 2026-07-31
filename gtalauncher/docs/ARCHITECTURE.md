@@ -20,7 +20,7 @@ If something is temporary (TestBot, frozen peds, Win32 overlay), it is a **scaff
 | FiveM-like idea | GTAMP (ours) | Today | Target |
 |-----------------|--------------|--------|--------|
 | Launcher / UI shell | `src/main` + `src/renderer` (Electron) | Working | Keep; polish server browser |
-| Start game process | `findLauncher()` → prefer **`GTA5.exe`** | Working | Never rely on R* flash-quit paths |
+| Start game process | `findLauncher()` → **PlayGTAV / Steam `-applaunch` / Epic** (FiveM-style); never bare `GTA5.exe` on R* DRM | Working | Platform must be running first |
 | Game client runtime | `src/native/hook/dllmain.cpp` | Hook + SHV natives | Stable script host inside GTA |
 | Native invoke | `src/native/shv/shv_invoker.h` | ScriptHookV | Optional own crossmap later |
 | Client↔server glue | Built-in MP relay in `main.js` (TCP 22100 + UDP) | Working path | Keep single relay; drop dual-bridge confusion |

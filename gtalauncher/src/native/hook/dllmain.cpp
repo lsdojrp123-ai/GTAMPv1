@@ -277,28 +277,53 @@ static int doSpawnPed(const char*modelName,float x,float y,float z,float h,int p
             // Extra configuration ONLY for remote (frozen) net peds.
             // Local spawns (F11, /spawncop, SRV welcome, etc.) keep behavior identical to v1.4.8.
             if(freeze){
-                // Minimal remote-clone setup — only well-known natives (avoid hash-0 SHV fatals)
+                // FiveM-style remote clone: mission entity, no AI, no ragdoll panic,
+                // collision on, not frozen solid (we drive coords via interpolation).
                 const uint64_t H_BLOCK_EVENTS = 0x9F8AA94D6D97DBF4ULL; // SET_BLOCKING_OF_NON_TEMPORARY_EVENTS
+                const uint64_t H_SET_CAN_RAGDOLL = 0xB128377056A54E2AULL; // SET_PED_CAN_RAGDOLL
+                const uint64_t H_SET_RAGDOLL_ON_COLLISION = 0xF99F1F3B5A9D2E5EULL; // may no-op if hash wrong
+                const uint64_t H_SET_COMBAT_ATTR = 0x9F7794730795E019ULL; // SET_PED_COMBAT_ATTRIBUTES
+                const uint64_t H_SET_FLEE_ATTR = 0x70A2D1137C8ED7C9ULL; // SET_PED_FLEE_ATTRIBUTES
+                const uint64_t H_SET_CAN_BE_TARGETTED = 0x63F58F7C80513AADULL; // SET_PED_CAN_BE_TARGETTED
+                const uint64_t H_SET_CAN_BE_TARGETTED_BY_PLAYER = 0x4328652AE5769C71ULL;
                 const uint64_t H_SET_ENTITY_COLLISION = 0x1A9205C1B9EE827FULL;
                 const uint64_t H_SET_ENTITY_VISIBLE = 0xEA1C610A04DB6BBBULL;
+                const uint64_t H_SET_PED_CONFIG_FLAG = 0x1913FE4CBF41C463ULL;
+                const uint64_t H_TASK_STAND = 0x919BE13EED931959ULL; // TASK_STAND_STILL
+                const uint64_t H_SET_PED_DIES_WHEN_INJURED = 0x5BA7919BED300023ULL;
                 wait(30);
                 Invoker(H_SET_MISSION).argi(np).argb(true).argb(true).retv();
                 wait(0);
                 Invoker(H_BLOCK_EVENTS).argi(np).argb(true).retv();
                 wait(0);
-                Invoker(H_FREEZE).argi(np).argb(true).retv(); // freeze; we teleport each tick
+                // Keep unfrozen so animation/look isn't locked; we still set coords each tick
+                Invoker(H_FREEZE).argi(np).argb(false).retv();
                 wait(0);
-                Invoker(H_SET_INVINCIBLE).argi(np).argb(true).retv();
+                Invoker(H_SET_INVINCIBLE).argi(np).argb(true).retv(); // damage lands in Phase 8
+                wait(0);
+                Invoker(H_SET_CAN_RAGDOLL).argi(np).argb(false).retv();
+                wait(0);
+                Invoker(H_SET_CAN_BE_TARGETTED).argi(np).argb(true).retv();
                 wait(0);
                 Invoker(H_SET_ENTITY_COLLISION).argi(np).argb(true).argb(false).retv();
                 wait(0);
                 Invoker(H_SET_ENTITY_VISIBLE).argi(np).argb(true).argb(false).retv();
                 wait(0);
+                // Disable ambient reactions / panic (config flags used by multiplayer clones)
+                Invoker(H_SET_PED_CONFIG_FLAG).argi(np).argi(208).argb(true).retv(); // disable pain audio spam
+                Invoker(H_SET_PED_CONFIG_FLAG).argi(np).argi(281).argb(true).retv(); // disable writhe
+                wait(0);
+                Invoker(H_SET_FLEE_ATTR).argi(np).argi(0).argb(false).retv();
+                wait(0);
+                Invoker(H_SET_COMBAT_ATTR).argi(np).argi(46).argb(false).retv();
+                wait(0);
                 Invoker(H_SET_COORDS).argi(np).argf(x).argf(y).argf(z).argb(false).argb(false).argb(false).retv();
                 wait(0);
                 Invoker(H_SET_HEADING).argi(np).argf(h).retv();
+                wait(0);
+                Invoker(H_TASK_STAND).argi(np).argi(86400000).retv();
                 wait(30);
-                logf("spawn: ped %d remote clone @ %.1f,%.1f,%.1f h=%.1f",np,x,y,z,h);
+                logf("spawn: ped %d configured as FiveM-style remote clone @ %.1f,%.1f,%.1f h=%.1f",np,x,y,z,h);
             }
         }
         Invoker(H_SET_MODEL_NO).argh(m).retv();
@@ -334,7 +359,10 @@ static void processNetPeds(DWORD now){
         float dist = sqrtf(dx*dx+dy*dy+dz*dz);
         // Stream out far players (hide + no tick) like FiveM entity culling
         if(dist > STREAM_OUT){
-            // skip far entities (no native hide — avoid extra native risk)
+            if(np->ped && np->visible){
+                Invoker(H_SET_ENTITY_VISIBLE).argi(np->ped).argb(false).argb(false).retv();
+                np->visible = 0;
+            }
             continue;
         }
         if(!np->ped){
@@ -357,8 +385,10 @@ static void processNetPeds(DWORD now){
             logf("netPed: id=%s ped vanished — will respawn", np->id);
             np->ped=0; np->blip=0; np->wantRespawn=1; continue;
         }
-        np->visible = 1;
-
+        if(dist < STREAM_IN && !np->visible){
+            Invoker(H_SET_ENTITY_VISIBLE).argi(np->ped).argb(true).argb(false).retv();
+            np->visible = 1;
+        }
         // Smooth interpolation toward network target (FiveM-style client blend)
         // alpha ~0.25 at 60fps feels responsive without rubber-banding hard
         const float a = 0.28f;
@@ -487,7 +517,7 @@ static void ensureLocalTestBot_SHV(){
     float bz = z;
     logf("localTestBot: spawning FiveM-style clone ahead at %.1f,%.1f,%.1f", bx, by, bz);
     // Use freemode first; fall back to cop (known-good on this machine)
-    const char* models[] = { "s_m_y_cop_01", "mp_m_freemode_01" };
+    const char* models[] = { "mp_m_freemode_01", "s_m_y_cop_01" };
     int ped = 0;
     for(int mi=0; mi<2 && !ped; mi++){
         ped = doSpawnPed(models[mi], bx, by, bz, h, 4, true, "[TestBot]");
@@ -553,10 +583,8 @@ static void __cdecl shvScriptMain(){
             lastBotTry=now; ensureLocalTestBot_SHV();
         }
         // Phase 6+7: nametags + chat HUD every frame (text natives are cheap)
-        // Text natives disabled — caused SHV "last native 0x0" fatals on some builds.
-        // Names still tracked; F9 overlay shows remote count. Re-enable with verified hashes later.
-        // drawNametags();
-        // drawChatUI();
+        drawNametags();
+        drawChatUI();
         // F8 toggles chat input (edge-trigger via static debounce)
         {
             static bool f8Was=false, escWas=false, retWas=false, bkWas=false;

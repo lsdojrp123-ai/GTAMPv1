@@ -648,6 +648,9 @@ async function connectTo(s) {
       dialogMessage('Launch error', res.error);
       return;
     }
+    if (res.note) toast(res.note, 'warn');
+    if (res.launched) logConsole('Launch method: '+res.launched+' (FiveM-style platform boot)','info');
+
     toast('GTAMP session started. GTA launches offline from Rockstar Online (our multiplayer). Hook loads in ~15–30s.','ok');
     logConsole(`GTAMP multiplayer -> ${s.addr} (Rockstar Online disabled; GTAMP hook injects in ~15-30s)`,'ok');
     // Add to history

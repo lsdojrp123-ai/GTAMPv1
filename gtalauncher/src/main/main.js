@@ -143,20 +143,6 @@ function handleServerPacket(pkt) {
       writeLaunchDiag(['MP WELCOME netId=' + mpNetId + ' server=' + (pkt.server && pkt.server.name)]);
       // Minimal client: ack resources immediately so server finalizes spawn
       mpSend({ t: 'resourceAck' });
-      // Seed remotes if server embedded a player list (optional)
-      if (Array.isArray(pkt.players)) {
-        for (const o of pkt.players) {
-          if (!o || o.netId == null || Number(o.netId) === Number(mpNetId)) continue;
-          const p = {
-            netId: o.netId, name: o.name || ('Player'+o.netId),
-            pos: o.pos || { x: o.x||0, y: o.y||0, z: o.z||72 },
-            h: o.h || 0, health: o.health ?? 200, model: o.model || 's_m_y_cop_01'
-          };
-          mpRemote.set(p.netId, p);
-          mpGotOtherPlayer = true;
-          hookSpawnRemotePlayer(p);
-        }
-      }
       break;
     }
     case 'spawn': {
@@ -289,17 +275,9 @@ function ensureMpUdp(serverAddr) {
   mpUdp.bind(() => {
     writeLaunchDiag(['MP UDP bound, joining ' + host + ':' + port + ' as ' + mpNick]);
     mpSend({ t: 'join', nick: mpNick });
-    // keepalive + soft re-join if never welcomed
+    // keepalive
     if (ensureMpUdp._ping) clearInterval(ensureMpUdp._ping);
-    let joins = 0;
-    ensureMpUdp._ping = setInterval(() => {
-      mpSend({ t: 'ping', ts: Date.now() });
-      if (!mpNetId && joins < 10) {
-        joins++;
-        mpSend({ t: 'join', nick: mpNick });
-        writeLaunchDiag(['MP re-join attempt ' + joins]);
-      }
-    }, 2000);
+    ensureMpUdp._ping = setInterval(() => mpSend({ t: 'ping', ts: Date.now() }), 2000);
   });
 }
 
@@ -321,16 +299,10 @@ function ensureHookTcpServer() {
           if (m.t === 'hookHello') {
             writeLaunchDiag(['hookHello v=' + (m.v || '?') + ' gta=' + (m.gta || '?')]);
           } else if (m.t === 'ready') {
-            writeLaunchDiag(['hook SHV ready ped=' + m.ped + ' remotes=' + mpRemote.size + ' mpNetId=' + mpNetId]);
+            writeLaunchDiag(['hook SHV ready ped=' + m.ped]);
             // Resync all known remotes into the game now that natives work
             for (const p of mpRemote.values()) hookSpawnRemotePlayer(p);
-            // Keep resyncing a few times — hook may drop early netPed before SHV ready
-            let n = 0;
-            const rs = setInterval(() => {
-              for (const p of mpRemote.values()) hookSpawnRemotePlayer(p);
-              if (++n >= 5) clearInterval(rs);
-            }, 2000);
-            setTimeout(() => { if (!mpGotOtherPlayer) startSoloBot(); }, 3000);
+            setTimeout(() => { if (!mpGotOtherPlayer) startSoloBot(); }, 2000);
           } else if (m.t === 'pos') {
             if (typeof m.x === 'number') {
               lastHookPos = { x: m.x, y: m.y, z: m.z, h: m.h || 0 };
@@ -485,29 +457,180 @@ function detectLauncher(gtaPath) {
   return 'rockstar';
 }
 
+function findSteamExe() {
+  const c = [];
+  if (process.env['ProgramFiles(x86)']) c.push(path.join(process.env['ProgramFiles(x86)'], 'Steam', 'steam.exe'));
+  if (process.env.ProgramFiles) c.push(path.join(process.env.ProgramFiles, 'Steam', 'steam.exe'));
+  if (process.env.LOCALAPPDATA) c.push(path.join(process.env.LOCALAPPDATA, 'Programs', 'Steam', 'steam.exe'));
+  c.push('C:\\\\Program Files (x86)\\\\Steam\\\\steam.exe');
+  for (const pth of c) { try { if (fs.existsSync(pth)) return pth; } catch {} }
+  return null;
+}
+
+function findRockstarLauncherExe() {
+  const c = [];
+  for (const ev of ['ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432', 'LOCALAPPDATA']) {
+    if (process.env[ev]) c.push(path.join(process.env[ev], 'Rockstar Games', 'Launcher', 'Launcher.exe'));
+  }
+  c.push('C:\\\\Program Files\\\\Rockstar Games\\\\Launcher\\\\Launcher.exe');
+  c.push('C:\\\\Program Files (x86)\\\\Rockstar Games\\\\Launcher\\\\Launcher.exe');
+  for (const pth of c) { try { if (fs.existsSync(pth)) return pth; } catch {} }
+  return null;
+}
+
+function findEpicExe() {
+  const c = [];
+  if (process.env['ProgramFiles(x86)'])
+    c.push(path.join(process.env['ProgramFiles(x86)'], 'Epic Games', 'Launcher', 'Portal', 'Binaries', 'Win32', 'EpicGamesLauncher.exe'));
+  if (process.env.ProgramFiles)
+    c.push(path.join(process.env.ProgramFiles, 'Epic Games', 'Launcher', 'Portal', 'Binaries', 'Win64', 'EpicGamesLauncher.exe'));
+  for (const pth of c) { try { if (fs.existsSync(pth)) return pth; } catch {} }
+  return null;
+}
+
+/** Windows: is process image running? */
+function isProcessRunning(imageName) {
+  try {
+    const { execSync } = require('child_process');
+    const out = execSync(`tasklist /FI "IMAGENAME eq ${imageName}" /NH`, {
+      windowsHide: true, encoding: 'utf8', timeout: 5000
+    }) || '';
+    return out.toLowerCase().includes(String(imageName).toLowerCase());
+  } catch { return false; }
+}
+
+/**
+ * FiveM / RAGE / alt:V style: ensure platform process is already running.
+ * Rockstar DRM (ERR_NO_LAUNCHER) requires Launcher/Steam/Epic — never bare GTA5.exe alone.
+ */
+function ensurePlatformRunning(kind) {
+  if (process.platform !== 'win32') return;
+  try {
+    if (kind === 'steam' || kind === 'steam-applaunch' || kind === 'steam-url') {
+      if (!isProcessRunning('steam.exe')) {
+        const steam = findSteamExe();
+        if (steam) {
+          spawn(steam, [], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+          writeLaunchDiag(['started Steam (was not running) — FiveM-style platform bootstrap']);
+        }
+      }
+    } else if (kind === 'rockstar' || kind === 'playgtav' || kind === 'gtavlauncher' || kind === 'rockstar-ui') {
+      if (!isProcessRunning('Launcher.exe') && !isProcessRunning('RockstarService.exe')) {
+        const rgl = findRockstarLauncherExe();
+        if (rgl) {
+          spawn(rgl, [], { detached: true, stdio: 'ignore', windowsHide: false, cwd: path.dirname(rgl) }).unref();
+          writeLaunchDiag(['started Rockstar Launcher (was not running) — required to avoid ERR_NO_LAUNCHER']);
+        }
+      }
+    } else if (kind === 'epic') {
+      if (!isProcessRunning('EpicGamesLauncher.exe')) {
+        const epic = findEpicExe();
+        if (epic) {
+          spawn(epic, [], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+          writeLaunchDiag(['started Epic Launcher (was not running)']);
+        }
+      }
+    }
+  } catch (e) {
+    writeLaunchDiag(['ensurePlatformRunning: ' + e.message]);
+  }
+}
+
+/**
+ * Start GTA the way multiplayer clients do:
+ *  1) Platform launcher running
+ *  2) Game started THROUGH platform (PlayGTAV / steam -applaunch / Epic)
+ *  3) Inject into GTA5.exe when it appears (never require user to run bare GTA5.exe)
+ */
 function findLauncher(launcherType, gtaPath) {
-  // Prefer GTA5.exe DIRECTLY. PlayGTAV/RGL often flash Rockstar UI then exit for 2nd PC.
-  // GTAMP multiplayer is our UDP stack; we only need the game process running.
-  const gta5 = path.join(gtaPath, 'GTA5.exe');
   const playGTA = path.join(gtaPath, 'PlayGTAV.exe');
+  const gtavLauncher = path.join(gtaPath, 'GTAVLauncher.exe');
   const w = config.windowed !== false;
-  // Minimal args: skip GTA Online, stay windowed for overlay. Avoid -disablenetwork (can hard-exit some installs).
-  const offArgs = ['-scOfflineOnly', '-nostraighttofreemode', '-borderless'];
-  if (w) offArgs.push('-windowed');
+  // Soft offline-from-R*Online flags. GTAMP multiplayer is our UDP.
+  // No -disablenetwork (breaks Social Club on many installs).
+  const gameArgs = ['-scOfflineOnly', '-nostraighttofreemode', '-borderless'];
+  if (w) gameArgs.push('-windowed');
 
-  if (fs.existsSync(gta5)) return { exe: gta5, args: offArgs, kind: 'gta5' };
-  if (fs.existsSync(playGTA)) return { exe: playGTA, args: offArgs, kind: 'playgtav' };
+  let kind = launcherType;
+  if (!kind || kind === 'auto') kind = detectLauncher(gtaPath);
 
-  // Steam: still try direct GTA5 under common path first was done above via gtaPath
-  if (launcherType === 'steam') {
-    // Last resort steam protocol (unreliable for 2nd client)
-    return { exe: 'cmd.exe', args: ['/c', 'start', '', 'steam://rungameid/271590//-scOfflineOnly/-windowed/-borderless'], kind: 'steam' };
+  // Steam — same pattern as FiveM: steam.exe -applaunch 271590
+  if (kind === 'steam') {
+    const steam = findSteamExe();
+    if (steam) {
+      return {
+        exe: steam,
+        args: ['-applaunch', '271590', ...gameArgs],
+        kind: 'steam-applaunch',
+        cwd: path.dirname(steam),
+        shell: false,
+        injectWaitMs: 90000,
+        ensurePlatform: 'steam',
+        note: 'Starting via Steam (FiveM-style). Wait for GTA — GTAMP injects into GTA5.exe automatically.'
+      };
+    }
+    return {
+      exe: 'cmd.exe',
+      args: ['/c', 'start', '', 'steam://rungameid/271590//' + gameArgs.join('/')],
+      kind: 'steam-url',
+      shell: false,
+      injectWaitMs: 90000,
+      ensurePlatform: 'steam',
+      note: 'Starting via Steam URL. Wait for GTA to open.'
+    };
   }
-  if (launcherType === 'epic') {
-    return { exe: 'cmd.exe', args: ['/c', 'start', '', 'com.epicgames.launcher://apps/9d2d0eb6f1c04d4b8b86e2ce4f4f584b%3A9d2d0eb6f1c04d4b8b86e2ce4f4f584b%3AHeather?action=launch&silent=true'], kind: 'epic' };
+
+  // Epic
+  if (kind === 'epic') {
+    return {
+      exe: 'cmd.exe',
+      args: ['/c', 'start', '', 'com.epicgames.launcher://apps/9d2d0eb6f1c04d4b8b86e2ce4f4f584b%3A9d2d0eb6f1c04d4b8b86e2ce4f4f584b%3AHeather?action=launch&silent=true'],
+      kind: 'epic',
+      shell: false,
+      injectWaitMs: 90000,
+      ensurePlatform: 'epic',
+      note: 'Starting via Epic. Wait for GTA5.exe — GTAMP injects automatically.'
+    };
   }
-  const gl = path.join(gtaPath, 'GTAVLauncher.exe');
-  if (fs.existsSync(gl)) return { exe: gl, args: offArgs, kind: 'gtavlauncher' };
+
+  // Rockstar / retail — MUST use PlayGTAV (talks to RGL). Bare GTA5.exe = ERR_NO_LAUNCHER.
+  if (fs.existsSync(playGTA)) {
+    return {
+      exe: playGTA,
+      args: gameArgs,
+      kind: 'playgtav',
+      cwd: gtaPath,
+      shell: false,
+      injectWaitMs: 90000,
+      ensurePlatform: 'rockstar',
+      note: 'Starting via PlayGTAV.exe (same idea as other MP clients). Rockstar Launcher must stay installed/running.'
+    };
+  }
+  if (fs.existsSync(gtavLauncher)) {
+    return {
+      exe: gtavLauncher,
+      args: gameArgs,
+      kind: 'gtavlauncher',
+      cwd: gtaPath,
+      shell: false,
+      injectWaitMs: 90000,
+      ensurePlatform: 'rockstar',
+      note: 'Starting via GTAVLauncher.exe. Wait for GTA5.exe.'
+    };
+  }
+  const rgl = findRockstarLauncherExe();
+  if (rgl) {
+    return {
+      exe: rgl,
+      args: [],
+      kind: 'rockstar-ui',
+      cwd: path.dirname(rgl),
+      shell: false,
+      injectWaitMs: 120000,
+      ensurePlatform: 'rockstar',
+      note: 'Rockstar Launcher opened. Click GTA V → Story Mode once. GTAMP waits for GTA5.exe then injects (like FiveM/RAGE).'
+    };
+  }
   return null;
 }
 
@@ -686,7 +809,7 @@ ipcMain.handle('game:launch', (_e, {serverAddr} = {}) => {
 
   const lt = config.launcherType === 'auto' ? detectLauncher(config.gtaPath) : config.launcherType;
   const launch = findLauncher(lt, config.gtaPath);
-  if (!launch) return {ok:false, error:'Could not find a launcher.'};
+  if (!launch) return {ok:false, error:'Could not find Steam, Epic, PlayGTAV.exe, or Rockstar Launcher. GTA must be started through the platform it was bought from (ERR_NO_LAUNCHER = bare GTA5.exe blocked).'};
 
   const nativeDir = app.isPackaged
     ? path.join(process.resourcesPath, 'native')
@@ -734,16 +857,32 @@ ipcMain.handle('game:launch', (_e, {serverAddr} = {}) => {
   }
 
   try {
-    const useShell = launch.kind === 'steam' || launch.kind === 'epic';
-    writeLaunchDiag(['launching kind=' + launch.kind, 'exe=' + launch.exe, 'args=' + JSON.stringify(launch.args)]);
-    gameProc = spawn(launch.exe, launch.args, {
-      cwd: (launch.kind === 'gta5' || launch.kind === 'playgtav')
-        ? config.gtaPath
-        : (fs.existsSync(launch.exe) && !launch.exe.toLowerCase().endsWith('cmd.exe') ? path.dirname(launch.exe) : config.gtaPath),
-      detached: true, stdio: 'ignore', shell: useShell, windowsHide: false
+    // FiveM-style: platform process first, then game through platform
+    if (launch.ensurePlatform) {
+      ensurePlatformRunning(launch.ensurePlatform);
+      // Give Steam/RGL a moment to come up before game start
+      try { require('child_process').execSync('ping 127.0.0.1 -n 3 >nul', { windowsHide: true }); } catch {}
+    }
+    const useShell = !!launch.shell || launch.kind === 'steam-url' || launch.kind === 'epic';
+    writeLaunchDiag([
+      'launching kind=' + launch.kind,
+      'exe=' + launch.exe,
+      'args=' + JSON.stringify(launch.args || []),
+      'injectWaitMs=' + (launch.injectWaitMs || 90000),
+      launch.note || ''
+    ]);
+    gameProc = spawn(launch.exe, launch.args || [], {
+      cwd: launch.cwd || config.gtaPath,
+      detached: true,
+      stdio: 'ignore',
+      shell: useShell,
+      windowsHide: false
     });
     gameProc.unref();
-    gameProc.on('error', e => console.error('[Main] game launch error:', e.message));
+    gameProc.on('error', e => {
+      console.error('[Main] game launch error:', e.message);
+      writeLaunchDiag(['game launch error: ' + e.message]);
+    });
 
     // Record in history
     addToHistory({
@@ -768,12 +907,12 @@ ipcMain.handle('game:launch', (_e, {serverAddr} = {}) => {
     ]);
 
     // Inject after GTA process exists. 15s default (was 30s).
-    const injectDelayMs = 15000;
+    const injectDelayMs = (launch && launch.injectWaitMs) || 90000;
     setTimeout(() => {
       try {
         if (fs.existsSync(injectorPath) && fs.existsSync(dllPath)) {
           writeLaunchDiag(['spawning injector now', injectorPath, dllPath]);
-          injectorProc = spawn(injectorPath, ['--process','GTA5.exe','--dll',dllPath,'--timeout','120000'],
+          injectorProc = spawn(injectorPath, ['--process','GTA5.exe','--dll',dllPath,'--timeout','180000'],
             { detached:true, stdio: isDev ? 'inherit' : 'ignore', windowsHide:true });
           injectorProc.unref();
           injectorProc.on('error', e => writeLaunchDiag(['injector process error: ' + e.message]));
@@ -794,8 +933,15 @@ ipcMain.handle('game:launch', (_e, {serverAddr} = {}) => {
 
     config.lastServer = effectiveAddr;
     saveConfig(config);
-    return { ok:true, launched: launch.kind, server:effectiveAddr, launcherType:lt,
-             injectScheduled: fs.existsSync(injectorPath)&&fs.existsSync(dllPath) };
+    return {
+      ok: true,
+      launched: launch.kind,
+      server: effectiveAddr,
+      launcherType: lt,
+      injectScheduled: fs.existsSync(injectorPath) && fs.existsSync(dllPath),
+      note: launch.note || null,
+      injectWaitMs: launch.injectWaitMs || 90000
+    };
   } catch (e) { return {ok:false, error:e.message}; }
 });
 
