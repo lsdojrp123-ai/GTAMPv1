@@ -24,13 +24,24 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 }
 
 static void print(const wchar_t* msg) {
-    // Write to a log file alongside the exe for debugging
+    // Log next to injector exe AND %TEMP% (users look in TEMP for hook logs)
     wchar_t path[MAX_PATH];
     GetModuleFileNameW(NULL, path, MAX_PATH);
     wchar_t* slash = wcsrchr(path, L'\\');
     if (slash) { wcscpy(slash + 1, L"gtamp_injector.log"); }
     FILE* f = _wfopen(path, L"a");
     if (f) { fputws(msg, f); fputwc(L'\n', f); fclose(f); }
+    wchar_t tmp[MAX_PATH];
+    if (GetTempPathW(MAX_PATH, tmp)) {
+        wcscat_s(tmp, MAX_PATH, L"gtamp_injector.log");
+        f = _wfopen(tmp, L"a");
+        if (f) { fputws(msg, f); fputwc(L'\n', f); fclose(f); }
+        // Also status file in TEMP
+        GetTempPathW(MAX_PATH, tmp);
+        wcscat_s(tmp, MAX_PATH, L"gtamp_status.txt");
+        f = _wfopen(tmp, L"a");
+        if (f) { fputws(msg, f); fputwc(L'\n', f); fclose(f); }
+    }
     OutputDebugStringW(msg);
 }
 

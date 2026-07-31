@@ -3,6 +3,16 @@ const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron')
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
+const os = require('os');
+function writeLaunchDiag(lines) {
+  try {
+    const text = lines.join('\n') + '\n';
+    const tmp = path.join(os.tmpdir(), 'gtamp_status.txt');
+    fs.appendFileSync(tmp, `[${new Date().toISOString()}]\n${text}\n---\n`);
+    try { fs.appendFileSync(path.join(app.getPath('userData'), 'gtamp_status.txt'), text + '\n'); } catch {}
+  } catch (e) { console.error('[Main] diag write failed', e.message); }
+}
+
 
 const isDev = process.argv.includes('--dev');
 let mainWindow = null;
@@ -376,17 +386,41 @@ ipcMain.handle('game:launch', (_e, {serverAddr} = {}) => {
       joinedAt: Date.now()
     });
 
+    // Diagnostics so user can find why hook is missing (TEMP\gtamp_status.txt)
+    writeLaunchDiag([
+      'game:launch',
+      'nativeDir=' + nativeDir,
+      'injectorPath=' + injectorPath + ' exists=' + fs.existsSync(injectorPath),
+      'dllPath=' + dllPath + ' exists=' + fs.existsSync(dllPath),
+      'gtaPath=' + config.gtaPath,
+      'server=' + effectiveAddr,
+      'isPackaged=' + app.isPackaged,
+      'resourcesPath=' + (process.resourcesPath || ''),
+      'NOTE: hook log appears at %TEMP%\\gtamp_hook.log ONLY after DLL injects',
+      'NOTE: injector log also at %TEMP%\\gtamp_injector.log'
+    ]);
+
+    // Inject after GTA process exists. 15s default (was 30s).
+    const injectDelayMs = 15000;
     setTimeout(() => {
       try {
         if (fs.existsSync(injectorPath) && fs.existsSync(dllPath)) {
-          injectorProc = spawn(injectorPath, ['--process','GTA5.exe','--dll',dllPath,'--timeout','90000'],
+          writeLaunchDiag(['spawning injector now', injectorPath, dllPath]);
+          injectorProc = spawn(injectorPath, ['--process','GTA5.exe','--dll',dllPath,'--timeout','120000'],
             { detached:true, stdio: isDev ? 'inherit' : 'ignore', windowsHide:true });
           injectorProc.unref();
+          injectorProc.on('error', e => writeLaunchDiag(['injector process error: ' + e.message]));
         } else {
-          console.log('[Main] Injector/DLL not found at', nativeDir);
+          const msg = 'Injector/DLL NOT FOUND at ' + nativeDir +
+            ' — copy gtamp_hook.dll + gtamp_injector.exe into resources\\native\\';
+          console.log('[Main]', msg);
+          writeLaunchDiag([msg]);
         }
-      } catch (e) { console.error('[Main] injector spawn error:', e); }
-    }, 30000);
+      } catch (e) {
+        console.error('[Main] injector spawn error:', e);
+        writeLaunchDiag(['injector spawn exception: ' + e.message]);
+      }
+    }, injectDelayMs);
 
     // Hook proxy for renderer (control channel)
     try { hookConnect(); } catch(e) { console.log('[Main] hookConnect err', e.message); }
