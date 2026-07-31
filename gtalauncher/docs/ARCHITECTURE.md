@@ -83,12 +83,14 @@ Server owns: who is in the session, what positions are authoritative.
 - [x] Solo TestBot as fake second player  
 - [x] Built-in launcher relay (hook ↔ server)
 
-### Now (stability — “runs like a real client”)
-- [ ] No SHV fatals on host or guest  
-- [ ] Second PC always gets a lasting `GTA5.exe` process  
-- [ ] Two real clients see each other’s peds + names  
-- [ ] Chat both ways over server  
-- [ ] Clear logs: `%TEMP%\gtamp_hook.log`, `gtamp_status.txt`
+### Now (stability — “runs like a real client”) — **active**
+- [x] Prefer direct `GTA5.exe` launch (2nd PC)  
+- [x] Soften SHV natives / avoid text-native fatals  
+- [x] Server accepts real GTA position stream (no false anti-cheat reject)  
+- [x] Late-join roster + re-sync remotes after SHV ready  
+- [ ] Two real clients confirmed seeing each other in playtest  
+- [ ] Chat both ways confirmed  
+- [ ] Clear logs always: `%TEMP%\gtamp_hook.log`, `gtamp_status.txt`
 
 ### Next (feels like multiplayer)
 - [ ] Health / simple damage  

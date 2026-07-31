@@ -163,15 +163,22 @@ class FXServer {
           player.lastSeen = Date.now();
           if (pkt.model) player.model = pkt.model;
           this.events.emit('playerSpawned', player);
-          // Phase 6: tell OTHER clients only (never echo join to self)
+          // Tell OTHER clients (FiveM-style playerJoining broadcast)
           const joinPkt = {
             t: 'playerJoin', netId: player.netId, name: player.name,
             pos: player.ped.pos, h: player.ped.state.get('h') || 0,
-            model: player.model || 'mp_m_freemode_01', health: 200, vehicle: 0
+            model: player.model || 's_m_y_cop_01', health: 200, vehicle: 0
+          };
+          const posPkt = {
+            t: 'playerPos', netId: player.netId, name: player.name,
+            model: player.model || 's_m_y_cop_01',
+            x: player.ped.pos.x, y: player.ped.pos.y, z: player.ped.pos.z,
+            h: player.ped.state.get('h') || 0, health: 200, inVeh: 0
           };
           for (const other of this.pm.getAll()) {
             if (other === player || !other.endpoint) continue;
             this._send(joinPkt, other.endpoint, true);
+            this._send(posPkt, other.endpoint, false);
           }
           console.log(`[FXServer] ${player.name} spawned at ${JSON.stringify(player.ped.pos)} model=${player.model}`);
         }
@@ -292,15 +299,16 @@ class FXServer {
       weather: 'CLEAR',
       time: { h: 12, m: 0 }
     });
-    // Send existing players/entities
-    const existing = this.pm.getAll().filter(p => p.netId !== player.netId && p.spawned);
+    // Roster snapshot for late joiners (FiveM-style: everyone already in session)
+    const existing = this.pm.getAll().filter(p => p.netId !== player.netId);
     for (const other of existing) {
       player.send({
         t: 'playerJoin',
         netId: other.netId, name: other.name,
-        pos: other.ped.pos, h: other.ped.state.get('h') || 0,
-        health: other.ped.state.get('health') ?? 200,
-        model: other.model || 'mp_m_freemode_01',
+        pos: other.ped ? other.ped.pos : { x: 0, y: 0, z: 72 },
+        h: other.ped ? (other.ped.state.get('h') || 0) : 0,
+        health: other.ped ? (other.ped.state.get('health') ?? 200) : 200,
+        model: other.model || 's_m_y_cop_01',
         vehicle: other.vehicle ? other.vehicle.id : 0
       });
     }
@@ -310,11 +318,20 @@ class FXServer {
   _handlePos(pkt, rinfo) {
     const player = this._findPlayerByEndpoint(rinfo);
     if (!player || !player.spawned || !player.ped) return;
-    const dt = 1 / TICK_HZ;
     const newPos = { x: +pkt.x || 0, y: +pkt.y || 0, z: +pkt.z || 0 };
-    const maxSpeed = player.vehicle ? 100 : 14;
     if (pkt.model) player.model = pkt.model;
-    if (this.em.validateMovement(player.ped, newPos, dt, maxSpeed)) {
+    // Real GTA clients send ~10Hz absolute coords. Fixed dt*walkCap rejects almost all moves
+    // and the first jump from default spawn (0,0,72) -> LS fails teleport check.
+    // Phase 8/9: accept first positions freely; light sanity only after settled.
+    const now = Date.now();
+    const lastT = player._lastPosAt || 0;
+    const dt = Math.max(0.05, Math.min(1.0, (now - lastT) / 1000 || 0.1));
+    player._lastPosAt = now;
+    const dx = newPos.x - player.ped.pos.x, dy = newPos.y - player.ped.pos.y, dz = newPos.z - player.ped.pos.z;
+    const dist = Math.sqrt(dx*dx+dy*dy+dz*dz);
+    const firstFixes = (player._posFixes = (player._posFixes || 0) + 1);
+    const allow = firstFixes <= 30 || dist < 150 || dist / dt < 120; // allow sprint/vehicles loosely
+    if (allow) {
       player.ped.pos = newPos;
       player.ped.vel = { x: pkt.vx||0, y: pkt.vy||0, z: pkt.vz||0 };
       player.ped.state.set('h', pkt.h||0);
@@ -323,7 +340,6 @@ class FXServer {
       if (pkt.armour != null) player.ped.state.set('armour', pkt.armour);
     }
     // Phase 5: broadcast position to other nearby players ~15Hz
-    const now = Date.now();
     if (!player._lastPosBroadcast || now - player._lastPosBroadcast > 66) {
       player._lastPosBroadcast = now;
       const pktOut = {

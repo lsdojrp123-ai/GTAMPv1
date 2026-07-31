@@ -143,6 +143,20 @@ function handleServerPacket(pkt) {
       writeLaunchDiag(['MP WELCOME netId=' + mpNetId + ' server=' + (pkt.server && pkt.server.name)]);
       // Minimal client: ack resources immediately so server finalizes spawn
       mpSend({ t: 'resourceAck' });
+      // Seed remotes if server embedded a player list (optional)
+      if (Array.isArray(pkt.players)) {
+        for (const o of pkt.players) {
+          if (!o || o.netId == null || Number(o.netId) === Number(mpNetId)) continue;
+          const p = {
+            netId: o.netId, name: o.name || ('Player'+o.netId),
+            pos: o.pos || { x: o.x||0, y: o.y||0, z: o.z||72 },
+            h: o.h || 0, health: o.health ?? 200, model: o.model || 's_m_y_cop_01'
+          };
+          mpRemote.set(p.netId, p);
+          mpGotOtherPlayer = true;
+          hookSpawnRemotePlayer(p);
+        }
+      }
       break;
     }
     case 'spawn': {
@@ -275,9 +289,17 @@ function ensureMpUdp(serverAddr) {
   mpUdp.bind(() => {
     writeLaunchDiag(['MP UDP bound, joining ' + host + ':' + port + ' as ' + mpNick]);
     mpSend({ t: 'join', nick: mpNick });
-    // keepalive
+    // keepalive + soft re-join if never welcomed
     if (ensureMpUdp._ping) clearInterval(ensureMpUdp._ping);
-    ensureMpUdp._ping = setInterval(() => mpSend({ t: 'ping', ts: Date.now() }), 2000);
+    let joins = 0;
+    ensureMpUdp._ping = setInterval(() => {
+      mpSend({ t: 'ping', ts: Date.now() });
+      if (!mpNetId && joins < 10) {
+        joins++;
+        mpSend({ t: 'join', nick: mpNick });
+        writeLaunchDiag(['MP re-join attempt ' + joins]);
+      }
+    }, 2000);
   });
 }
 
@@ -299,10 +321,16 @@ function ensureHookTcpServer() {
           if (m.t === 'hookHello') {
             writeLaunchDiag(['hookHello v=' + (m.v || '?') + ' gta=' + (m.gta || '?')]);
           } else if (m.t === 'ready') {
-            writeLaunchDiag(['hook SHV ready ped=' + m.ped]);
+            writeLaunchDiag(['hook SHV ready ped=' + m.ped + ' remotes=' + mpRemote.size + ' mpNetId=' + mpNetId]);
             // Resync all known remotes into the game now that natives work
             for (const p of mpRemote.values()) hookSpawnRemotePlayer(p);
-            setTimeout(() => { if (!mpGotOtherPlayer) startSoloBot(); }, 2000);
+            // Keep resyncing a few times — hook may drop early netPed before SHV ready
+            let n = 0;
+            const rs = setInterval(() => {
+              for (const p of mpRemote.values()) hookSpawnRemotePlayer(p);
+              if (++n >= 5) clearInterval(rs);
+            }, 2000);
+            setTimeout(() => { if (!mpGotOtherPlayer) startSoloBot(); }, 3000);
           } else if (m.t === 'pos') {
             if (typeof m.x === 'number') {
               lastHookPos = { x: m.x, y: m.y, z: m.z, h: m.h || 0 };
