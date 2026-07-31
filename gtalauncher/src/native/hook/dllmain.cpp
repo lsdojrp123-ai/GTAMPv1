@@ -675,7 +675,17 @@ static LRESULT CALLBACK wndProc(HWND w,UINT m,WPARAM a,LPARAM b){
 static DWORD WINAPI overlayThread(LPVOID){logf("overlay start");HINSTANCE hi=(HINSTANCE)GetModuleHandleA(NULL);WNDCLASSEXA wc={0};wc.cbSize=sizeof(wc);wc.lpfnWndProc=wndProc;wc.hInstance=hi;wc.hbrBackground=CreateSolidBrush(OVERLAY_KEY);wc.lpszClassName=OV_CLASS;RegisterClassExA(&wc);for(int i=0;i<200&&g_running;i++){g_gta=findGtaWnd();if(g_gta)break;Sleep(100);}if(g_gta){char t[96]={0};GetWindowTextA(g_gta,t,96);logf("GTA hwnd=%p '%s'",(void*)g_gta,t);}g_ov=CreateWindowExA(WS_EX_TOPMOST|WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,OV_CLASS,"GTAMP",WS_POPUP|WS_VISIBLE,0,0,720,240,NULL,NULL,hi,NULL);if(g_ov){SetLayeredWindowAttributes(g_ov,OVERLAY_KEY,255,LWA_COLORKEY|LWA_ALPHA);logf("overlay %p",(void*)g_ov);}strcpy_s(g_f.err,"Waiting for SHV ready...");MSG m;DWORD la=timeGetTime();
     while(g_running){while(PeekMessageA(&m,NULL,0,0,PM_REMOVE)){TranslateMessage(&m);DispatchMessageA(&m);}if(!g_gta||!IsWindow(g_gta))g_gta=findGtaWnd();if(g_gta&&IsWindow(g_gta)&&g_ov){RECT g;if(IsWindowVisible(g_gta)&&GetWindowRect(g_gta,&g)){SetWindowPos(g_ov,HWND_TOPMOST,g.left+16,g.top+16,720,240,SWP_NOACTIVATE|SWP_SHOWWINDOW|SWP_NOOWNERZORDER);ShowWindow(g_ov,g_vis?SW_SHOWNOACTIVATE:SW_HIDE);InvalidateRect(g_ov,NULL,FALSE);}}if(GetAsyncKeyState(VK_F9)&1){g_vis=!g_vis;logf("overlay %s",g_vis?"on":"off");Sleep(250);}if(GetAsyncKeyState(VK_F10)&1){if(g_shvReady){logf("rescan (F10)");g_f.found=false;la=timeGetTime()-2000;doScan();}Sleep(250);}if(GetAsyncKeyState(VK_F11)&1){if(shv::loaded()){logf("F11 pressed - queuing local cop spawn (shvReady=%d)",(int)g_shvReady);SpawnReq r={0};strcpy_s(r.src,"F11");strcpy_s(r.model,"s_m_y_cop_01");r.useOffset=true;r.pedType=6;queueSpawn(&r);if(!g_shvReady)snprintf(g_shvMsg,sizeof(g_shvMsg),"F11 queued - will spawn once loaded");}else{logf("F11 pressed but SHV not loaded");snprintf(g_shvMsg,sizeof(g_shvMsg),"Waiting for ScriptHookV...");}Sleep(500);}DWORD now=timeGetTime();if(g_shvReady&&!g_f.found&&now-la>1500){la=now;doScan();}Sleep(25);}if(g_ov)DestroyWindow(g_ov);UnregisterClassA(OV_CLASS,hi);return 0;
 }
-static void connectBridge(){g_sock=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);sockaddr_in a={0};a.sin_family=AF_INET;a.sin_port=htons(22100);inet_pton(AF_INET,"127.0.0.1",&a.sin_addr);if(connect(g_sock,(sockaddr*)&a,sizeof(a))==0){char h[256];snprintf(h,sizeof(h),"{\"t\":\"hookHello\",\"v\":\"" HOOK_VER "\",\"gta\":\"%s\"}\n",g_ver);sl(h);logf("bridge connected");}else{closesocket(g_sock);g_sock=INVALID_SOCKET;}}
+static void connectBridge(){
+    g_sock=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
+    if(g_sock==INVALID_SOCKET){ static DWORD lt=0; DWORD n=timeGetTime(); if(n-lt>3000){lt=n; logf("bridge: socket() failed err=%u",(unsigned)WSAGetLastError());} return; }
+    sockaddr_in a={0};a.sin_family=AF_INET;a.sin_port=htons(22100);inet_pton(AF_INET,"127.0.0.1",&a.sin_addr);
+    if(connect(g_sock,(sockaddr*)&a,sizeof(a))==0){
+        char h[256];snprintf(h,sizeof(h),"{\"t\":\"hookHello\",\"v\":\"" HOOK_VER "\",\"gta\":\"%s\"}\n",g_ver);sl(h);logf("bridge connected 127.0.0.1:22100");
+    }else{
+        static DWORD lt=0; DWORD n=timeGetTime(); if(n-lt>3000){lt=n; logf("bridge: connect 127.0.0.1:22100 failed err=%u (is client-bridge running?)",(unsigned)WSAGetLastError());}
+        closesocket(g_sock);g_sock=INVALID_SOCKET;
+    }
+}
 // Net-thread: parse packet and update NetPed bookkeeping ONLY.
 // Any native call (spawn/delete/move) is queued for the SHV fiber.
 static void handleNetLine(const char*l){int ln=(int)strlen(l);if(ln<5)return;

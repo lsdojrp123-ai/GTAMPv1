@@ -333,7 +333,22 @@ ipcMain.handle('game:launch', (_e, {serverAddr} = {}) => {
   const nativeDir = app.isPackaged
     ? path.join(process.resourcesPath, 'native')
     : path.join(__dirname, '..', '..', 'dist-bin');
-  const clientBridgePath = path.join(__dirname, '..', 'client', 'client-bridge.js');
+  // client-bridge must be a REAL file path (asar.unpacked). Inside asar, spawn fails silently.
+  const clientBridgePath = (() => {
+    const candidates = [
+      // Packaged: extraResources copies bridge next to native/
+      path.join(process.resourcesPath || '', 'client', 'client-bridge.js'),
+      // asarUnpack fallback
+      path.join(process.resourcesPath || '', 'app.asar.unpacked', 'src', 'client', 'client-bridge.js'),
+      path.join(process.resourcesPath || '', 'app.asar.unpacked', 'client', 'client-bridge.js'),
+      // Dev
+      path.join(__dirname, '..', 'client', 'client-bridge.js'),
+    ];
+    for (const c of candidates) {
+      try { if (c && fs.existsSync(c)) return c; } catch {}
+    }
+    return candidates[0];
+  })();
 
   const injectorPath = path.join(nativeDir, 'gtamp_injector.exe');
   const dllPath = path.join(nativeDir, 'gtamp_hook.dll');
@@ -344,24 +359,63 @@ ipcMain.handle('game:launch', (_e, {serverAddr} = {}) => {
   const platformUrl = fxServerInfo?.platformUrl || 'http://127.0.0.1:22003';
   const effectiveAddr = serverAddr || `${host}:${gamePort}`;
 
-  // Start client bridge
+  // Start client bridge (TCP 22100 for hook). Log to %TEMP%\gtamp_bridge.log
   try {
     if (bridgeProc && !bridgeProc.killed) bridgeProc.kill();
-    bridgeProc = spawn(process.execPath, [clientBridgePath], {
-      env: {
-        ...process.env,
-        GTAMP_SERVER: effectiveAddr,
-        GTAMP_NICK: config.nickname || 'Player',
-        GTAMP_RES_PORT: String(resPort),
-        GTAMP_PLATFORM_URL: platformUrl,
-        GTAMP_CACHE_DIR: path.join(fivemStyleDataDir, 'cache'),
-        ELECTRON_RUN_AS_NODE: '1'
-      },
-      detached: true, stdio: isDev ? 'inherit' : 'ignore', windowsHide: true
-    });
-    bridgeProc.unref();
-    bridgeProc.on('error', e => console.error('[Main] bridge error:', e.message));
-  } catch (e) { console.error('[Main] bridge spawn error:', e); }
+    const bridgeLog = path.join(require('os').tmpdir(), 'gtamp_bridge.log');
+    const bridgeExists = fs.existsSync(clientBridgePath);
+    writeLaunchDiag([
+      'starting client bridge',
+      'bridgePath=' + clientBridgePath,
+      'bridgeExists=' + bridgeExists,
+      'bridgeLog=' + bridgeLog,
+      'server=' + effectiveAddr
+    ]);
+    if (!bridgeExists) {
+      writeLaunchDiag(['FATAL: client-bridge.js not found — multiplayer will not work']);
+    } else {
+      let logFd = 'ignore';
+      try {
+        fs.writeFileSync(bridgeLog, '');
+        logFd = fs.openSync(bridgeLog, 'a');
+      } catch {}
+      // Resolve ws: prefer unpacked node_modules, then app root node_modules (dev)
+      const nodePathParts = [
+        path.join(process.resourcesPath || '', 'app.asar.unpacked', 'node_modules'),
+        path.join(process.resourcesPath || '', 'app.asar.unpacked', 'src', 'node_modules'),
+        path.join(path.dirname(clientBridgePath), 'node_modules'),
+        path.join(__dirname, '..', '..', 'node_modules'),
+        process.env.NODE_PATH || ''
+      ].filter(Boolean);
+      bridgeProc = spawn(process.execPath, [clientBridgePath], {
+        cwd: path.dirname(clientBridgePath),
+        env: {
+          ...process.env,
+          GTAMP_SERVER: effectiveAddr,
+          GTAMP_NICK: config.nickname || 'Player',
+          GTAMP_RES_PORT: String(resPort),
+          GTAMP_PLATFORM_URL: platformUrl,
+          GTAMP_CACHE_DIR: path.join(fivemStyleDataDir, 'cache'),
+          ELECTRON_RUN_AS_NODE: '1',
+          NODE_PATH: nodePathParts.join(path.delimiter)
+        },
+        detached: true,
+        stdio: isDev ? 'inherit' : ['ignore', logFd, logFd],
+        windowsHide: true
+      });
+      bridgeProc.unref();
+      bridgeProc.on('error', e => {
+        console.error('[Main] bridge error:', e.message);
+        writeLaunchDiag(['bridge error: ' + e.message]);
+      });
+      bridgeProc.on('exit', (code, sig) => {
+        writeLaunchDiag(['bridge exited code=' + code + ' signal=' + sig]);
+      });
+    }
+  } catch (e) {
+    console.error('[Main] bridge spawn error:', e);
+    writeLaunchDiag(['bridge spawn exception: ' + e.message]);
+  }
 
   if (process.platform !== 'win32') {
     config.lastServer = effectiveAddr; saveConfig(config);

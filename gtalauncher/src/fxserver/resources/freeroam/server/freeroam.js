@@ -17,59 +17,72 @@ let botSpawned = false;
 let botAngle = 0;
 const botPos = { x: -295, y: -1340, z: 31.3 };
 let botTicker = null;
+let lastRealPlayer = null;
 
-function startBot() {
+// Anchor for TestBot orbit — updated from first/local player position
+let botAnchor = { x: botPos.x, y: botPos.y, z: botPos.z };
+
+function startBot(aroundPlayer) {
   if (botTicker) return;
+  if (aroundPlayer && aroundPlayer.ped && aroundPlayer.ped.pos) {
+    botAnchor = { ...aroundPlayer.ped.pos };
+    botPos.x = botAnchor.x; botPos.y = botAnchor.y; botPos.z = botAnchor.z;
+  }
   botSpawned = false;
-  // Announce the bot to all existing players
   emit('botPlayerJoin');
-  // Tell all current players about the bot (we use broadcast)
+  const joinPos = { x: botAnchor.x + 4, y: botAnchor.y, z: botAnchor.z };
   if (typeof broadcast === 'function') {
-    broadcast({ t:'playerJoin', netId:BOT_ID, name:BOT_NAME, pos:botPos, h:0, health:200, model:BOT_MODEL, vehicle:0 });
+    broadcast({ t:'playerJoin', netId:BOT_ID, name:BOT_NAME, pos:joinPos, h:0, health:200, model:BOT_MODEL, vehicle:0 });
   }
   botSpawned = true;
   botAngle = 0;
   botTicker = setInterval(() => {
+    // Prefer last known real player position (updated in playerSpawned + player pos ticks)
+    if (lastRealPlayer && lastRealPlayer.ped && lastRealPlayer.ped.pos) {
+      botAnchor = { ...lastRealPlayer.ped.pos };
+    }
     botAngle += 0.03;
-    const px = botPos.x + Math.cos(botAngle) * 4;
-    const py = botPos.y + Math.sin(botAngle) * 4;
+    const px = botAnchor.x + Math.cos(botAngle) * 5;
+    const py = botAnchor.y + Math.sin(botAngle) * 5;
+    const pz = botAnchor.z;
     let h = botAngle * 180/Math.PI + 90;
-    h = ((h % 360) + 360) % 360; // keep heading in 0..360 like GTA/FiveM
+    h = ((h % 360) + 360) % 360;
     if (typeof broadcast === 'function') {
       broadcast({ t:'playerPos', netId:BOT_ID, name:BOT_NAME, model:BOT_MODEL,
-                  x:px, y:py, z:botPos.z, h:h, health:200, inVeh:0 });
+                  x:px, y:py, z:pz, h:h, health:200, inVeh:0 });
     }
   }, 66); // ~15Hz
-  console.log('[freeroam] test bot started (netId=9001, walking in circle at airport)');
+  console.log('[freeroam] test bot started near player at', botAnchor);
 }
 
 on('playerSpawned', (player) => {
   player.money = player.money || 5000;
+  lastRealPlayer = player;
+  if (player.ped && player.ped.pos) botAnchor = { ...player.ped.pos };
   console.log(`[freeroam] ${player.name} spawned (#${player.netId})`);
-  sendChat(player, `Welcome ${player.name}! Remote players sync FiveM-style (peds, nametags, blips). F8 chat.`);
+  sendChat(player, `Welcome ${player.name}! Phase 6: remote peds + nametags. F8 chat. F11 local cop.`);
 
-  // Start the test bot on first spawn (server-wide)
   if (!botTicker) {
     setTimeout(() => {
-      startBot();
-      sendChat(player, 'TestBot has connected - watch for a cop walking in circles near you!');
-    }, 4000);
+      startBot(player);
+      sendChat(player, 'TestBot connected — look for a freemode ped walking circles near YOU.');
+    }, 3000);
   } else {
-    // Late-join: send the bot directly
     setTimeout(() => {
       if (player.endpoint) {
-        player.send({ t:'playerJoin', netId:BOT_ID, name:BOT_NAME, pos:botPos, h:0, health:200, model:BOT_MODEL, vehicle:0 });
-        sendChat(player, 'TestBot is walking in circles nearby!');
+        const jp = { x: botAnchor.x + 4, y: botAnchor.y, z: botAnchor.z };
+        player.send({ t:'playerJoin', netId:BOT_ID, name:BOT_NAME, pos:jp, h:0, health:200, model:BOT_MODEL, vehicle:0 });
+        sendChat(player, 'TestBot is nearby (orbiting players).');
       }
-    }, 2000);
+    }, 1500);
   }
 
-  // Welcome cop (offset)
+  // Welcome cop 5m in front via client spawnPed
   setTimeout(() => {
     if (!player.endpoint) return;
     player.send({ t:'spawnPed', src:'SRV', model:'s_m_y_cop_01', pedType:6, offset:true });
-    sendChat(player, 'Spawning welcome cop #1 (5m in front)...');
-  }, 7000);
+    sendChat(player, 'Welcome cop spawning 5m ahead...');
+  }, 5000);
 });
 
 on('playerJoined', (player) => {

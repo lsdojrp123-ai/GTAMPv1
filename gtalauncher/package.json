@@ -35,6 +35,14 @@
           "*.exe",
           "*.dll"
         ]
+      },
+      {
+        "from": "src/client/client-bridge.js",
+        "to": "client/client-bridge.js"
+      },
+      {
+        "from": "node_modules/ws",
+        "to": "client/node_modules/ws"
       }
     ],
     "asar": true,
@@ -59,7 +67,11 @@
       "artifactName": "GTAMP-Launcher-v${version}.exe",
       "requestExecutionLevel": "user",
       "unpackDirName": "GTAMP-v152-HOTFIX"
-    }
+    },
+    "asarUnpack": [
+      "**/client/client-bridge.js",
+      "**/node_modules/ws/**/*"
+    ]
   },
   "devDependencies": {
     "electron": "^28.0.0",
