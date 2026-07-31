@@ -37,13 +37,7 @@ const samplePosts = posts.length ? posts : [
 ];
 const sampleReplies = replies.length ? replies : [{ id: 1, pid: 2, uid: 4, body: 'That fixed it for me, thanks!', at: Date.now() }];
 
-function pub(u) { return u ? { id: u.id, username: u.username, badges: [] } : null; }
 function live() { return sampleServers; }
-
-function rel(url) {
-  // convert absolute site paths to relative file paths for static opening
-  return url.replace(/^\//, '').replace(/\/$/, '') + '.html';
-}
 
 const base = { settings, badges, page: '/' };
 const viewsDir = path.join(__dirname, '..', 'views');
@@ -53,12 +47,17 @@ fs.mkdirSync(outDir, { recursive: true });
 function render(view, data, outName) {
   return ejs.renderFile(path.join(viewsDir, view + '.ejs'), { ...base, ...data }, { views: viewsDir, filename: path.join(viewsDir, view + '.ejs') })
     .then(html => {
+      const depth = outName.split('/').length - 1;
+      const up = depth === 0 ? './' : '../'.repeat(depth);
       const fixed = html.replace(/(href|action|src)=("|')(\/[^"']*)\2/g, (m, attr, q, p) => {
-        if (p === '/') return attr + '=' + q + './index.html' + q;
-        if (p.startsWith('/css/') || p.startsWith('/js/')) return attr + '=' + q + '.' + p + q;
-        if (p.startsWith('/download/')) return attr + '=' + q + '../../' + p.replace('/download/', '') + q;
+        if (p === '/') return attr + '=' + q + up + 'index.html' + q;
+        if (p.startsWith('/css/') || p.startsWith('/js/')) return attr + '=' + q + up + p.slice(1) + q;
+        if (p.startsWith('/download/')) return attr + '=' + q + up + p.replace('/download/', '') + q;
         if (p.startsWith('/artifacts/') || p.startsWith('/api/')) return attr + '=' + q + '#' + q;
-        return attr + '=' + q + './' + p.replace(/^\//, '') + '.html' + q;
+        if (p === '/logout') return attr + '=' + q + up + 'index.html' + q;
+        const t = p.replace(/^\//, '');
+        if (/^forum\/thread\/\d+$/.test(t)) return attr + '=' + q + up + t.replace('thread/', 'thread-') + '.html' + q;
+        return attr + '=' + q + up + t + '.html' + q;
       });
       fs.mkdirSync(path.dirname(path.join(outDir, outName)), { recursive: true });
       fs.writeFileSync(path.join(outDir, outName), fixed);
@@ -66,59 +65,55 @@ function render(view, data, outName) {
 }
 
 function serverRow(s) {
-  const tags = (s.tags||[]).map(t => `<span class="tag">${t}</span>`).join('');
+  const tags = (s.tags || []).map(t => `<span class="tag">${t}</span>`).join('');
   return `<div class="server-row" onclick="location='servers/${s.id}.html'">
-    <div class="server-icon">${(s.name||'S')[0]}</div>
+    <div class="server-icon">${(s.name || 'S')[0]}</div>
     <div class="server-info"><div class="name"><span class="live-dot"></span>${s.name}</div>
-    <div class="desc">${s.desc||''}</div></div>
+    <div class="desc">${s.desc || ''}</div></div>
     <div class="server-meta"><div class="players">${s.players}/${s.maxPlayers} players</div>
     <div class="tags">${tags}</div></div></div>`;
 }
 
 (async () => {
-// main pages
-await render('index', { user: null, liveCount: live().length, livePlayers: live().reduce((a, s) => a + s.players, 0) }, 'index.html');
-await render('servers', { user: null }, 'servers.html');
-// bake sample server rows into the static servers page (no backend at file://)
-{
-  const sp = path.join(outDir, 'servers.html');
-  let shtml = fs.readFileSync(sp, 'utf8');
-  const rows = live().map(serverRow).join('');
-  shtml = shtml.replace('<div id="server-list"><div class="muted">Loading servers...</div></div>',
-                        '<div id="server-list">' + rows + '</div>');
-  fs.writeFileSync(sp, shtml);
-}
-await render('forum', { user: null, cats, posts: samplePosts }, 'forum.html');
-await render('marketplace', { user: null, assets: sampleAssets }, 'marketplace.html');
-await render('docs', { user: null, docs }, 'docs.html');
-await render('support', { user: null }, 'support.html');
-await render('run_server', { user: null, artifacts }, 'run-server.html');
-await render('login', { user: null, error: null }, 'login.html');
-await render('register', { user: null, error: null }, 'register.html');
+  await render('index', { user: null, liveCount: live().length, livePlayers: live().reduce((a, s) => a + s.players, 0) }, 'index.html');
+  await render('servers', { user: null }, 'servers.html');
+  {
+    const sp = path.join(outDir, 'servers.html');
+    let shtml = fs.readFileSync(sp, 'utf8');
+    const rows = live().map(serverRow).join('');
+    shtml = shtml.replace('<div id="server-list"><div class="muted">Loading servers...</div></div>',
+                          '<div id="server-list">' + rows + '</div>');
+    fs.writeFileSync(sp, shtml);
+  }
+  await render('forum', { user: null, cats, posts: samplePosts }, 'forum.html');
+  await render('marketplace', { user: null, assets: sampleAssets }, 'marketplace.html');
+  await render('docs', { user: null, docs }, 'docs.html');
+  await render('support', { user: null }, 'support.html');
+  await render('run_server', { user: null, artifacts }, 'run-server.html');
+  await render('login', { user: null, error: null }, 'login.html');
+  await render('register', { user: null, error: null }, 'register.html');
+  await render('keymaster', {
+    user: { id: 1, username: 'DemoUser' }, licenses: [{ key: 'GTAMP-DEMO-0001', type: 'server' }],
+    assets: [{ id: 1, title: 'Realistic Car Pack', price: 12.99, published: true }]
+  }, 'keymaster.html');
 
-// docs detail pages
-for (const d of docs) await render('doc', { user: null, doc: d }, 'docs/' + d.id + '.html');
+  for (const d of docs) await render('doc', { user: null, doc: d }, 'docs/' + d.id + '.html');
+  for (const c of cats) await render('forum_cat', { user: null, cat: c, posts: samplePosts.filter(p => p.cat === c.id) }, 'forum/' + c.id + '.html');
+  for (const p of samplePosts) await render('thread', { user: null, post: p, replies: sampleReplies.filter(r => r.pid === p.id) }, 'forum/thread-' + p.id + '.html');
+  for (const s of live()) await render('server', { user: null, srv: s }, 'servers/' + s.id + '.html');
+  for (const a of sampleAssets) await render('marketplace_item', { user: null, asset: a, author: { username: 'Author' } }, 'marketplace/' + a.id + '.html');
 
-// forum category + thread pages
-for (const c of cats) await render('forum_cat', { user: null, cat: c, posts: samplePosts.filter(p => p.cat === c.id) }, 'forum/' + c.id + '.html');
-for (const p of samplePosts) await render('thread', { user: null, post: p, replies: sampleReplies.filter(r => r.pid === p.id) }, 'forum/thread-' + p.id + '.html');
+  const pubDir = path.join(__dirname, '..', 'public');
+  fs.mkdirSync(path.join(outDir, 'css'), { recursive: true });
+  fs.mkdirSync(path.join(outDir, 'js'), { recursive: true });
+  fs.copyFileSync(path.join(pubDir, 'css', 'style.css'), path.join(outDir, 'css', 'style.css'));
+  fs.copyFileSync(path.join(pubDir, 'js', 'main.js'), path.join(outDir, 'js', 'main.js'));
+  try {
+    const exe = path.join(__dirname, '..', '..', 'GTAMP-Launcher-v1.6.0.exe');
+    if (fs.existsSync(exe)) fs.copyFileSync(exe, path.join(outDir, 'GTAMP-Launcher-v1.6.0.exe'));
+  } catch (e) {}
+  fs.writeFileSync(path.join(outDir, 'sample-servers.json'), JSON.stringify({ servers: live() }));
 
-// server detail pages
-for (const s of live()) await render('server', { user: null, srv: s }, 'servers/' + s.id + '.html');
-
-// marketplace items
-for (const a of sampleAssets) await render('marketplace_item', { user: null, asset: a, author: { username: 'Author' } }, 'marketplace/' + a.id + '.html');
-
-// copy css + js + images
-const pubDir = path.join(__dirname, '..', 'public');
-fs.mkdirSync(path.join(outDir, 'css'), { recursive: true });
-fs.mkdirSync(path.join(outDir, 'js'), { recursive: true });
-fs.copyFileSync(path.join(pubDir, 'css', 'style.css'), path.join(outDir, 'css', 'style.css'));
-fs.copyFileSync(path.join(pubDir, 'js', 'main.js'), path.join(outDir, 'js', 'main.js'));
-
-// sample server list JSON for the static servers page to read
-fs.writeFileSync(path.join(outDir, 'sample-servers.json'), JSON.stringify({ servers: live() }));
-
-console.log('Static site built at ' + outDir);
-console.log('Open ' + path.join(outDir, 'index.html'));
+  console.log('Static site built at ' + outDir);
+  console.log('Open ' + path.join(outDir, 'index.html'));
 })();

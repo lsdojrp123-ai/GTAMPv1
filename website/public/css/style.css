@@ -105,6 +105,22 @@ footer a:hover{color:#fff}
 .faq-a{padding:0 18px 16px;color:var(--muted);display:none}
 .faq-item.open .faq-a{display:block}
 
+/* FiveM-style homepage extras */
+.live-badge{display:inline-block;margin:18px auto 22px;padding:8px 18px;border-radius:999px;background:var(--acc-soft);border:1px solid rgba(124,92,255,.4);color:#fff;font-weight:600}
+.terms{color:var(--muted);font-size:12px;margin-top:14px}
+.feature-grid{max-width:900px;margin:0 auto}
+.feat{text-align:left}
+.feat-icon{font-size:30px;color:var(--acc-hi);margin-bottom:10px}
+.alt{background:var(--panel);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.req-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:24px;max-width:900px;margin:0 auto}
+.req{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--panel2)}
+.req-head{padding:14px 18px;font-weight:700;text-transform:uppercase;letter-spacing:1px;font-size:13px;color:var(--acc-hi);border-bottom:1px solid var(--line)}
+.req table{width:100%;border-collapse:collapse}
+.req td{padding:12px 18px;border-bottom:1px solid var(--line);font-size:14px}
+.req td:first-child{color:var(--muted);font-weight:600;width:80px}
+.req tr:last-child td{border-bottom:none}
+.req td b{color:#fff}
+
 /* misc */
 .muted{color:var(--muted)}
 .center{text-align:center}
