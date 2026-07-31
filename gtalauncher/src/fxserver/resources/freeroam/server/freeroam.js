@@ -19,7 +19,7 @@ const botPos = { x: -295, y: -1340, z: 31.3 };
 let botTicker = null;
 
 function startBot() {
-  if (botTicker) return;
+  if (botTicker) return false;
   botSpawned = false;
   // Announce the bot to all existing players
   emit('botPlayerJoin');
@@ -40,6 +40,21 @@ function startBot() {
     }
   }, 66); // ~15Hz
   console.log('[freeroam] test bot started (netId=9001, walking in circle at airport)');
+  return true;
+}
+
+// Phase 6 single-client lifecycle test: emits the same definitive leave packet
+// that a real disconnect produces, so the hook must delete the remote ped.
+function stopBot() {
+  if (!botTicker) return false;
+  clearInterval(botTicker);
+  botTicker = null;
+  botSpawned = false;
+  if (typeof broadcast === 'function') {
+    broadcast({ t:'playerLeft', netId:BOT_ID, name:BOT_NAME });
+  }
+  console.log('[freeroam] test bot stopped (playerLeft broadcast)');
+  return true;
 }
 
 on('playerSpawned', (player) => {
@@ -88,6 +103,25 @@ RegisterCommand('givemoney', (src, args) => {
   src.money += amt;
   emitNet('money', src, src.money);
   sendChat(src, `+$${amt} (wallet $${src.money})`);
+});
+
+// F8: /testbot [start|stop|restart]
+// Lets one GTA client verify remote join, despawn, and respawn lifecycle behavior.
+RegisterCommand('testbot', (src, args) => {
+  const action = String((args && args[0]) || 'restart').toLowerCase();
+  if (action === 'stop') {
+    const stopped = stopBot();
+    if (src) sendChat(src, stopped ? 'TestBot disconnected. Its remote ped should disappear.' : 'TestBot is already stopped.');
+  } else if (action === 'start') {
+    const started = startBot();
+    if (src) sendChat(src, started ? 'TestBot connected. One named remote ped should appear.' : 'TestBot is already running.');
+  } else {
+    stopBot();
+    setTimeout(() => {
+      const started = startBot();
+      if (src) sendChat(src, started ? 'TestBot restarted. Verify exactly one remote ped appears.' : 'TestBot restart failed.');
+    }, 250);
+  }
 });
 
 RegisterCommand('spawncop', (src) => {
