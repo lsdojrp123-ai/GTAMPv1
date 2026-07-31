@@ -1,4 +1,4 @@
-// Freeroam gamemode - v1.5.0: Phase 5 remote player position sync test.
+// Freeroam gamemode - v1.6.0: Phase 6 join/leave peds + Phase 7 chat relay.
 //
 // Phase 4: server->client spawnPed pipeline.
 // Phase 5: continuous playerPos broadcast, netPed/netPedPos/netPedDel hook commands.
@@ -12,7 +12,7 @@ function sendChat(player, msg, name='SERVER') {
 // Tests Phase 5 pipeline (playerJoin + playerPos streaming) without needing a 2nd GTA client.
 const BOT_ID = 9001;
 const BOT_NAME = 'TestBot';
-const BOT_MODEL = 's_m_y_cop_01';
+const BOT_MODEL = 'mp_m_freemode_01';
 let botSpawned = false;
 let botAngle = 0;
 const botPos = { x: -295, y: -1340, z: 31.3 };
@@ -33,7 +33,8 @@ function startBot() {
     botAngle += 0.03;
     const px = botPos.x + Math.cos(botAngle) * 4;
     const py = botPos.y + Math.sin(botAngle) * 4;
-    const h = botAngle * 180/Math.PI + 90;
+    let h = botAngle * 180/Math.PI + 90;
+    h = ((h % 360) + 360) % 360; // keep heading in 0..360 like GTA/FiveM
     if (typeof broadcast === 'function') {
       broadcast({ t:'playerPos', netId:BOT_ID, name:BOT_NAME, model:BOT_MODEL,
                   x:px, y:py, z:botPos.z, h:h, health:200, inVeh:0 });
@@ -45,7 +46,7 @@ function startBot() {
 on('playerSpawned', (player) => {
   player.money = player.money || 5000;
   console.log(`[freeroam] ${player.name} spawned (#${player.netId})`);
-  sendChat(player, `Welcome to GTAMP freeroam, ${player.name}! Phase 5 REMOTE PLAYER SYNC active.`);
+  sendChat(player, `Welcome ${player.name}! Remote players sync FiveM-style (peds, nametags, blips). F8 chat.`);
 
   // Start the test bot on first spawn (server-wide)
   if (!botTicker) {
@@ -96,4 +97,4 @@ RegisterCommand('spawncop', (src) => {
   sendChat(src, 'Spawning a cop in front of you (server-originated)...');
 });
 
-print('freeroam v1.5.0 loaded - Phase 5 remote player position sync');
+print('freeroam v1.6.0 loaded - Phase 6 remote lifecycle + Phase 7 chat');

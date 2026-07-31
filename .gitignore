@@ -1,0 +1,7 @@
+
+# Large local builds (use GitHub Releases for binaries)
+GTAMP-Launcher-v*/
+GTAMP-v*-UPDATE/
+EXE-PARTS/
+*.exe.OLD
+/release/*.exe

@@ -72,6 +72,63 @@ function flushHookQueue() {
   }
 }
 
+
+// ---- Phase 6: remote player ped lifecycle helpers ----
+function remotePedId(netId) { return 'p' + netId; }
+
+function isSelfNetId(netId) {
+  return netId != null && state.netId != null && Number(netId) === Number(state.netId);
+}
+
+/** Push full spawn command for one remote player to the hook DLL. */
+function hookSpawnRemote(p) {
+  if (!p || p.netId == null || isSelfNetId(p.netId)) return;
+  const pos = p.pos || { x: 0, y: 0, z: 72 };
+  hookSend({
+    t: 'netPed',
+    id: remotePedId(p.netId),
+    netId: p.netId,
+    name: p.name || ('Player' + p.netId),
+    model: p.model || 'mp_m_freemode_01',
+    x: +pos.x || 0, y: +pos.y || 0, z: +pos.z || 72,
+    h: p.h || 0,
+    health: p.health ?? 200,
+    armour: p.armour ?? 0,
+    vx: p.vx || 0, vy: p.vy || 0, vz: p.vz || 0
+  });
+}
+
+/** Push position-only update for one remote player. */
+function hookMoveRemote(p) {
+  if (!p || p.netId == null || isSelfNetId(p.netId)) return;
+  const pos = p.pos || { x: 0, y: 0, z: 72 };
+  hookSend({
+    t: 'netPedPos',
+    id: remotePedId(p.netId),
+    netId: p.netId,
+    name: p.name || ('Player' + p.netId),
+    model: p.model || 'mp_m_freemode_01',
+    x: +pos.x || 0, y: +pos.y || 0, z: +pos.z || 72,
+    h: p.h || 0,
+    health: p.health ?? 200,
+    armour: p.armour ?? 0,
+    vx: p.vx || 0, vy: p.vy || 0, vz: p.vz || 0
+  });
+}
+
+function hookDeleteRemote(netId) {
+  if (netId == null || isSelfNetId(netId)) return;
+  hookSend({ t: 'netPedDel', id: remotePedId(netId) });
+}
+
+/** After netPedClear (or hook reconnect), re-create every known remote ped. */
+function resyncAllRemotePeds(reason) {
+  const list = [...state.players.values()].filter(p => !isSelfNetId(p.netId));
+  console.log(`[Client] Phase6 resync ${list.length} remote peds (${reason || 'manual'})`);
+  for (const p of list) hookSpawnRemote(p);
+}
+
+
 // ---- Resources (stages 6+7+8) ----
 const resourceVMs = new Map();
 
@@ -313,25 +370,40 @@ async function handleServerPacket(pkt) {
       break;
     }
     case 'spawn': {
-      // STAGE 10: spawn player
+      // STAGE 10 / Phase 6: local spawn — wipe stale remote peds then rebuild from roster
       state.me.x = pkt.pos.x; state.me.y = pkt.pos.y; state.me.z = pkt.pos.z;
       state.me.model = pkt.model || state.me.model || 'mp_m_freemode_01';
       state.weather = pkt.weather || 'CLEAR';
       if (pkt.time) { state.timeH = pkt.time.h; state.timeM = pkt.time.m; }
       state.spawned = true;
       console.log('[Client] SPAWN at', pkt.pos, 'model='+state.me.model);
-      // Reset remote peds on fresh spawn
+      // Clear in-game remote peds (hook), keep state.players roster, then re-spawn each
       hookSend({ t:'netPedClear' });
+      resyncAllRemotePeds('local-spawn');
       broadcastWS({ t: 'spawn', pos: pkt.pos, model: state.me.model, weather: state.weather });
       clientEvents.emit('playerSpawned');
       sendUDP({ t: 'spawnComplete', model: state.me.model });
       break;
     }
     case 'snapshot': {
-      // STAGE 11/12: delta stream of nearby entities
-      for (const e of (pkt.entities||[])) {
+      // STAGE 11/12 + Phase 6: interest snapshot keeps roster + remote peds warm
+      for (const e of (pkt.entities || [])) {
         if (e.type === 'player') {
-          state.players.set(e.netId, { ...state.players.get(e.netId), ...e });
+          if (isSelfNetId(e.netId)) continue;
+          const prev = state.players.get(e.netId);
+          const pos = e.pos || (prev && prev.pos) || { x: 0, y: 0, z: 72 };
+          const merged = {
+            netId: e.netId,
+            name: e.name || (prev && prev.name) || ('Player' + e.netId),
+            pos,
+            h: e.h || (prev && prev.h) || 0,
+            health: e.health ?? (prev && prev.health) ?? 200,
+            model: e.model || (prev && prev.model) || 'mp_m_freemode_01',
+            vehicle: e.vehicle || 0
+          };
+          state.players.set(e.netId, merged);
+          if (!prev) hookSpawnRemote(merged);
+          else hookMoveRemote(merged);
         } else if (e.type === 'vehicle') {
           state.vehicles.set(e.id, { ...state.vehicles.get(e.id), ...e });
         }
@@ -341,71 +413,84 @@ async function handleServerPacket(pkt) {
         state.bank = pkt.self.bank ?? state.bank;
         state.me.health = pkt.self.health ?? state.me.health;
       }
-      // Remove players not in snapshot (left streaming range)
-      const seenIds = new Set((pkt.entities||[]).filter(e=>e.type==='player').map(e=>e.netId));
-      for (const id of [...state.players.keys()]) {
-        if (!seenIds.has(id) && id !== state.netId) {
-          // Don't remove immediately, rely on playerLeft for definitive leave
-        }
-      }
       break;
     }
     case 'playerJoin': {
+      // Phase 6 lifecycle: join → track → auto-create remote ped (never self)
+      if (isSelfNetId(pkt.netId)) {
+        console.log(`[Client] Phase6 ignore self playerJoin #${pkt.netId}`);
+        break;
+      }
+      const prev = state.players.get(pkt.netId);
       const p = {
-        netId: pkt.netId, name: pkt.name, pos: pkt.pos||{x:0,y:0,z:0}, h: pkt.h||0,
-        health: pkt.health||200, model: pkt.model||'s_m_y_cop_01', vehicle: pkt.vehicle||0
+        netId: pkt.netId,
+        name: pkt.name || (prev && prev.name) || ('Player' + pkt.netId),
+        pos: pkt.pos || (prev && prev.pos) || { x: 0, y: 0, z: 72 },
+        h: pkt.h || (prev && prev.h) || 0,
+        health: pkt.health ?? (prev && prev.health) ?? 200,
+        model: pkt.model || (prev && prev.model) || 'mp_m_freemode_01',
+        vehicle: pkt.vehicle || 0
       };
       state.players.set(pkt.netId, p);
-      // Tell hook to spawn a remote ped for this player
-      hookSend({ t:'netPed', id: 'p'+pkt.netId, name: pkt.name, model: p.model,
-                 x: p.pos.x, y: p.pos.y, z: p.pos.z, h: p.h||0 });
+      hookSpawnRemote(p);
       clientEvents.emit('playerJoining', pkt.netId);
       broadcastWS({ t: 'playerJoin', ...pkt });
-      console.log(`[Client] + player ${pkt.name} (#${pkt.netId}) model=${p.model} @ ${p.pos.x|0},${p.pos.y|0},${p.pos.z|0}`);
+      console.log(`[Client] Phase6 JOIN +${p.name} (#${p.netId}) model=${p.model} @ ${p.pos.x|0},${p.pos.y|0},${p.pos.z|0}`);
       break;
     }
-    case 'playerLeft':
+    case 'playerLeft': {
+      // Phase 6 lifecycle: leave → despawn remote ped
+      const left = state.players.get(pkt.netId);
+      const leftName = (pkt.name || (left && left.name) || ('#' + pkt.netId));
       state.players.delete(pkt.netId);
-      hookSend({ t:'netPedDel', id: 'p'+pkt.netId });
-      broadcastWS({ t: 'playerLeft', netId: pkt.netId, name: pkt.name });
+      hookDeleteRemote(pkt.netId);
+      broadcastWS({ t: 'playerLeft', netId: pkt.netId, name: leftName });
       clientEvents.emit('playerDropped', pkt.netId, 'left');
-      console.log(`[Client] - player ${pkt.name}`);
+      console.log(`[Client] Phase6 LEAVE -${leftName} (#${pkt.netId})`);
       break;
+    }
     case 'playerPos': {
-      // Position update for one remote player (server sends at ~15-20Hz)
-      const p = state.players.get(pkt.netId);
+      // Phase 6: position stream (~15Hz). Unknown id → auto-create ped (late join / missed packet)
+      if (isSelfNetId(pkt.netId)) break;
+      let p = state.players.get(pkt.netId);
       if (!p) {
-        // Unknown player (e.g. joined before snapshot); create entry
-        state.players.set(pkt.netId, {
-          netId: pkt.netId, name: pkt.name||('Player'+pkt.netId),
-          pos: {x:pkt.x,y:pkt.y,z:pkt.z}, h: pkt.h||0,
-          health: pkt.health||200, model: pkt.model||'s_m_y_cop_01', vehicle:0
-        });
-        hookSend({ t:'netPed', id:'p'+pkt.netId, name:pkt.name||('P'+pkt.netId),
-                   model:pkt.model||'s_m_y_cop_01', x:pkt.x, y:pkt.y, z:pkt.z, h:pkt.h||0 });
+        p = {
+          netId: pkt.netId,
+          name: pkt.name || ('Player' + pkt.netId),
+          pos: { x: pkt.x, y: pkt.y, z: pkt.z },
+          h: pkt.h || 0,
+          health: pkt.health ?? 200,
+          model: pkt.model || 'mp_m_freemode_01',
+          vehicle: 0
+        };
+        state.players.set(pkt.netId, p);
+        console.log(`[Client] Phase6 auto-create from pos #${pkt.netId} ${p.name}`);
+        hookSpawnRemote(p);
       } else {
-        p.pos = { x:pkt.x, y:pkt.y, z:pkt.z };
-        p.h = pkt.h||0;
+        const modelChanged = pkt.model && pkt.model !== p.model;
+        p.pos = { x: pkt.x, y: pkt.y, z: pkt.z };
+        p.h = pkt.h || 0;
         if (pkt.model) p.model = pkt.model;
-        hookSend({ t:'netPedPos', id:'p'+pkt.netId, name:p.name, model:p.model,
-                   x:pkt.x, y:pkt.y, z:pkt.z, h:pkt.h||0 });
+        if (pkt.name) p.name = pkt.name;
+        if (pkt.health != null) p.health = pkt.health;
+        if (modelChanged) hookSpawnRemote(p); // respawn with new model
+        else hookMoveRemote(p);
       }
       break;
     }
-    case 'playerQuit': // alias
+    case 'playerQuit': { // alias of playerLeft
       state.players.delete(pkt.netId);
-      hookSend({ t:'netPedDel', id: 'p'+pkt.netId });
+      hookDeleteRemote(pkt.netId);
       break;
+    }
     case 'chat':
       state.chat.push({ from: pkt.name, msg: pkt.msg, ts: Date.now() });
       if (state.chat.length > 200) state.chat.shift();
       broadcastWS({ t: 'chat', name: pkt.name, msg: pkt.msg, netId: pkt.netId });
       clientEvents.emit('chatMessage', pkt.name || 'SERVER', pkt.msg);
+      // Phase 7: push chat into the hook so F8 HUD / nametag client can render it
+      hookSend({ t: 'chat', name: pkt.name || 'SERVER', msg: pkt.msg || '', netId: pkt.netId || 0 });
       console.log(`[CHAT] ${pkt.name}: ${pkt.msg}`);
-      // commands
-      if (typeof pkt.msg === 'string' && pkt.msg.startsWith('/') && !pkt.name) {
-        // server-issued commands (rare)
-      }
       break;
     case 'createVehicle':
       if (pkt.entity) state.vehicles.set(pkt.entity.id, pkt.entity);
@@ -438,6 +523,8 @@ const tcpServer = net.createServer((socket) => {
   state.hook = socket;
   // Flush anything queued while hook was offline (e.g. server welcome spawns)
   flushHookQueue();
+  // Phase 6: hook may have been re-injected mid-session — recreate remote peds
+  resyncAllRemotePeds('hook-connect');
   socket.setEncoding('utf8');
   let buf = '';
   socket.on('data', (d) => {
@@ -462,6 +549,8 @@ const tcpServer = net.createServer((socket) => {
       } else if (m.t === 'hookHello') {
         broadcastWS({ t:'hookHello', v:m.v, gta:m.gta }); broadcastCtrl(m);
       } else if (m.t === 'ready') {
+        // Phase 6: SHV fiber is live — ensure remote peds exist in-world
+        resyncAllRemotePeds('hook-ready');
         broadcastWS({ t:'hookReady', ...m }); broadcastCtrl(m);
       } else if (m.t === 'spawn') {
         if (m.ped && m.ok) state.entities.set(m.ped, { id:m.ped, type:'ped', model:m.model, pos:{x:m.x,y:m.y,z:m.z,h:m.h||0} });

@@ -118,6 +118,12 @@ class FXServer {
     try { pkt = JSON.parse(pktData.toString('utf8').trim()); } catch { return; }
     if (!pkt || !pkt.t) return;
 
+    // Phase 6: keep disconnect-timeout accurate
+    {
+      const _p = this._findPlayerByEndpoint(rinfo);
+      if (_p) _p.lastSeen = Date.now();
+    }
+
     switch (pkt.t) {
       case 'join': this._handleJoin(pkt, rinfo); break;
       case 'ack': {
@@ -154,11 +160,19 @@ class FXServer {
         const player = this._findPlayerByEndpoint(rinfo);
         if (player && !player.spawned) {
           player.spawned = true;
+          player.lastSeen = Date.now();
           if (pkt.model) player.model = pkt.model;
           this.events.emit('playerSpawned', player);
-          this._broadcast({ t: 'playerJoin', netId: player.netId, name: player.name,
-                            pos: player.ped.pos, h: 0,
-                            model: player.model || 'mp_m_freemode_01', health: 200, vehicle: 0 });
+          // Phase 6: tell OTHER clients only (never echo join to self)
+          const joinPkt = {
+            t: 'playerJoin', netId: player.netId, name: player.name,
+            pos: player.ped.pos, h: player.ped.state.get('h') || 0,
+            model: player.model || 'mp_m_freemode_01', health: 200, vehicle: 0
+          };
+          for (const other of this.pm.getAll()) {
+            if (other === player || !other.endpoint) continue;
+            this._send(joinPkt, other.endpoint, true);
+          }
           console.log(`[FXServer] ${player.name} spawned at ${JSON.stringify(player.ped.pos)} model=${player.model}`);
         }
         break;
@@ -220,6 +234,7 @@ class FXServer {
     player._welcomed = false;
     player._spawned = false;
 
+    player.lastSeen = Date.now();
     this.events.emit('playerJoining', player);
     console.log(`[FXServer] ${name} joined (#${player.netId}) from ${rinfo.address}:${rinfo.port}`);
     this._sendWelcome(player);
@@ -285,7 +300,7 @@ class FXServer {
         netId: other.netId, name: other.name,
         pos: other.ped.pos, h: other.ped.state.get('h') || 0,
         health: other.ped.state.get('health') ?? 200,
-        model: other.model || 's_m_y_cop_01',
+        model: other.model || 'mp_m_freemode_01',
         vehicle: other.vehicle ? other.vehicle.id : 0
       });
     }
@@ -305,6 +320,7 @@ class FXServer {
       player.ped.state.set('h', pkt.h||0);
       player.ped.state.set('health', pkt.health ?? 200);
       player.ped.state.set('inVeh', pkt.inVeh || 0);
+      if (pkt.armour != null) player.ped.state.set('armour', pkt.armour);
     }
     // Phase 5: broadcast position to other nearby players ~15Hz
     const now = Date.now();
@@ -312,10 +328,12 @@ class FXServer {
       player._lastPosBroadcast = now;
       const pktOut = {
         t: 'playerPos',
-        netId: player.netId, name: player.name, model: player.model || 's_m_y_cop_01',
+        netId: player.netId, name: player.name, model: player.model || 'mp_m_freemode_01',
         x: player.ped.pos.x, y: player.ped.pos.y, z: player.ped.pos.z,
         h: player.ped.state.get('h') || 0,
         health: player.ped.state.get('health') ?? 200,
+        armour: player.ped.state.get('armour') ?? 0,
+        vx: player.ped.vel?.x || 0, vy: player.ped.vel?.y || 0, vz: player.ped.vel?.z || 0,
         inVeh: player.ped.state.get('inVeh') || 0
       };
       // Send to all OTHER spawned players (reliable=false — pos is fire-and-forget)
@@ -435,6 +453,7 @@ class FXServer {
           type: 'player', pos: other.ped.pos,
           h: other.ped.state.get('h') || 0,
           health: other.ped.state.get('health') ?? 200,
+          model: other.model || 'mp_m_freemode_01',
           vehicle: other.vehicle ? other.vehicle.id : 0
         });
       }

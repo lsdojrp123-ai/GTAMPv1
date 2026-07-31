@@ -1,4 +1,4 @@
-/* GTAMP Hook v1.5.2 - Phase 5: remote player position sync (cross-thread native-call fix). */
+/* GTAMP Hook v1.6.0 - Phase 6 FiveM-like remote players + Phase 7 F8 chat. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <winsock2.h>
@@ -17,9 +17,9 @@
 #pragma comment(lib,"version.lib")
 #pragma comment(lib,"winmm.lib")
 
-#define HOOK_VER "1.5.2"
+#define HOOK_VER "1.6.0"
 #define OVERLAY_KEY RGB(255,0,255)
-#define OV_CLASS "GTAMP_OV152"
+#define OV_CLASS "GTAMP_OV160"
 static volatile bool g_running=true;
 static HANDLE g_ovT=NULL, g_netT=NULL;
 static HWND g_ov=NULL, g_gta=NULL;
@@ -40,7 +40,25 @@ static int g_localPed=0;
 struct SpawnReq{char src[8];char model[64];float x,y,z,h;bool useOffset;int pedType;};
 // Remote players (server-broadcast). NetPlayerId -> ped handle + state.
 #define NET_PED_MAX 32
-struct NetPed{int used;char id[32];char name[32];char model[64];int ped;Vec3 pos;float h;DWORD lastUpdate;};
+struct NetPed{
+    int used;
+    char id[32];          // "p12"
+    char name[32];        // display name
+    char model[64];
+    int ped;              // entity handle
+    int blip;             // map blip
+    int serverId;         // numeric id for nametag (FiveM-style)
+    Vec3 pos;             // network target
+    Vec3 drawPos;         // interpolated render pos
+    float h;              // target heading
+    float drawH;          // interpolated heading
+    float vx,vy,vz;
+    int health, armour;
+    DWORD lastUpdate;
+    int wantRespawn;      // model change: del entity but keep slot
+    int spawnQueued;     // NQ_SPAWN already in flight
+    int visible;
+};
 static NetPed g_netPeds[NET_PED_MAX];
 // Ring-buffer queue so spawns that arrive before SHV ready are NOT dropped.
 #define SPAWN_Q_SIZE 16
@@ -50,12 +68,59 @@ static NetPed g_netPeds[NET_PED_MAX];
 struct NpCmd{int op;char id[32];char name[32];char model[64];float x,y,z,h;};
 #define NP_Q_SIZE 64
 static void logf(const char* fmt,...); // forward decl
+static void sendJson(const char* fmt,...); // forward decl (used by chat before def)
+static void sstrcpy(char*dst,const char*src,size_t sz); // forward decl
 static SpawnReq g_spawnQ[SPAWN_Q_SIZE];
 static NpCmd g_npQ[NP_Q_SIZE];
 static volatile LONG g_qHead=0,g_qTail=0;
 static volatile LONG g_npHead=0,g_npTail=0;
 static CRITICAL_SECTION g_qCs;
 static CRITICAL_SECTION g_npCs;
+
+// ---- Phase 7: F8 in-game chat ----
+#define CHAT_LOG_MAX 8
+#define CHAT_INPUT_MAX 200
+struct ChatLine { char text[256]; DWORD born; unsigned char r,g,b; };
+static ChatLine g_chatLog[CHAT_LOG_MAX];
+static int g_chatLogN = 0;
+static bool g_chatOpen = false;
+static char g_chatInput[CHAT_INPUT_MAX+1] = {0};
+static int g_chatInputLen = 0;
+static DWORD g_chatOpenAt = 0;
+static void pushChatLine(const char* text, unsigned char r=220, unsigned char g=220, unsigned char b=220){
+    if(!text||!*text) return;
+    if(g_chatLogN >= CHAT_LOG_MAX){
+        memmove(&g_chatLog[0], &g_chatLog[1], sizeof(ChatLine)*(CHAT_LOG_MAX-1));
+        g_chatLogN = CHAT_LOG_MAX-1;
+    }
+    ChatLine* L = &g_chatLog[g_chatLogN++];
+    memset(L,0,sizeof(*L));
+    { size_t i=0; for(;i+1<sizeof(L->text)&&text[i];i++) L->text[i]=text[i]; L->text[i]=0; }
+    L->born = timeGetTime(); L->r=r; L->g=g; L->b=b;
+}
+static void chatEscapeJson(const char* in, char* out, size_t outSz){
+    size_t o=0;
+    for(size_t i=0; in && in[i] && o+2<outSz; i++){
+        char c=in[i];
+        if(c=='\\' || c=='"'){ if(o+3>=outSz) break; out[o++]='\\'; out[o++]=c; }
+        else if(c=='\n'||c=='\r'||c=='\t'){ out[o++]=' '; }
+        else if((unsigned char)c < 32) continue;
+        else out[o++]=c;
+    }
+    out[o]=0;
+}
+static void submitChat(){
+    if(g_chatInputLen<=0){ g_chatOpen=false; g_chatInput[0]=0; g_chatInputLen=0; return; }
+    // trim
+    while(g_chatInputLen>0 && g_chatInput[g_chatInputLen-1]==' ') g_chatInput[--g_chatInputLen]=0;
+    int start=0; while(g_chatInput[start]==' ') start++;
+    if(!g_chatInput[start]){ g_chatOpen=false; g_chatInput[0]=0; g_chatInputLen=0; return; }
+    char esc[CHAT_INPUT_MAX*2+8]; chatEscapeJson(g_chatInput+start, esc, sizeof(esc));
+    sendJson("{\"t\":\"chat\",\"msg\":\"%s\"}", esc);
+    logf("chat: sent '%s'", g_chatInput+start);
+    g_chatOpen=false; g_chatInput[0]=0; g_chatInputLen=0;
+}
+
 static inline void spawnQ_strcpy(char*dst,const char*src,size_t sz){
     if(!dst||!sz)return; if(!src)src="";
     size_t i=0;for(;i+1<sz&&src[i];i++)dst[i]=src[i];
@@ -139,12 +204,54 @@ static void queueNpCmd(const NpCmd*c){
     LeaveCriticalSection(&g_npCs);
 }
 // SHV-fiber-only: actually delete a netPed's entity and free slot.
-static void deleteNetPed_SHV(NetPed*np){
+static void removeBlip_SHV(NetPed*np){
+    using namespace shv;
+    if(!np || !np->blip) return;
+    const uint64_t H_REMOVE_BLIP = 0x86A652570E5F25DDULL; // REMOVE_BLIP(Blip*)
+    int b = np->blip;
+    Invoker(H_REMOVE_BLIP).argp(&b).retv();
+    np->blip = 0;
+}
+// hard=true frees the slot (player left). hard=false only deletes entity (model change / respawn).
+static void deleteNetPed_SHV(NetPed*np, bool hard=true){
     using namespace shv;
     if(!np)return;
     const uint64_t H_DELETE_ENTITY=0xAE3CBE5BF394C9C9ULL;
-    if(np->ped){Invoker(H_DELETE_ENTITY).argi(np->ped).argb(false).retv();wait(0);logf("netPed: deleted ped %d id=%s",np->ped,np->id);}
-    int idx=(int)(np-g_netPeds);if(idx>=0&&idx<NET_PED_MAX){memset(&g_netPeds[idx],0,sizeof(NetPed));g_netPedCount--;}
+    removeBlip_SHV(np);
+    if(np->ped){
+        Invoker(H_DELETE_ENTITY).argi(np->ped).argb(false).retv();
+        wait(0);
+        logf("netPed: deleted ped %d id=%s hard=%d",np->ped,np->id,(int)hard);
+        np->ped=0;
+    }
+    if(hard){
+        int idx=(int)(np-g_netPeds);
+        if(idx>=0&&idx<NET_PED_MAX){memset(&g_netPeds[idx],0,sizeof(NetPed));g_netPedCount--;}
+    } else {
+        np->wantRespawn = 1;
+    }
+}
+static int addPlayerBlip_SHV(int ped, const char* name){
+    using namespace shv;
+    if(!ped) return 0;
+    const uint64_t H_ADD_BLIP = 0x5CDE92C702A8FCE7ULL; // ADD_BLIP_FOR_ENTITY
+    const uint64_t H_SET_BLIP_SPRITE = 0xDF735600A4696DAFULL;
+    const uint64_t H_SET_BLIP_COLOUR = 0x03D7FB09E75D6B7EULL;
+    const uint64_t H_SET_BLIP_SCALE = 0xD38744167B2FA257ULL;
+    const uint64_t H_SET_BLIP_AS_SHORT_RANGE = 0xBE8BE4FE60E27B72ULL;
+    const uint64_t H_BEGIN_TEXT = 0xF9113A30F2C16B2AULL; // BEGIN_TEXT_COMMAND_SET_BLIP_NAME
+    const uint64_t H_ADD_TEXT = 0x6C188BE134E074AAULL;   // ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME
+    const uint64_t H_END_TEXT = 0xBC38B49BCB83BC9BULL;   // END_TEXT_COMMAND_SET_BLIP_NAME
+    int blip = Invoker(H_ADD_BLIP).argi(ped).reti();
+    if(!blip) return 0;
+    Invoker(H_SET_BLIP_SPRITE).argi(blip).argi(1).retv(); // standard circle
+    Invoker(H_SET_BLIP_COLOUR).argi(blip).argi(0).retv(); // white
+    Invoker(H_SET_BLIP_SCALE).argi(blip).argf(0.85f).retv();
+    Invoker(H_SET_BLIP_AS_SHORT_RANGE).argi(blip).argb(false).retv();
+    Invoker(H_BEGIN_TEXT).argp((void*)"STRING").retv();
+    Invoker(H_ADD_TEXT).argp((void*)(name && name[0] ? name : "Player")).retv();
+    Invoker(H_END_TEXT).argi(blip).retv();
+    return blip;
 }
 static int doSpawnPed(const char*modelName,float x,float y,float z,float h,int pedType,bool freeze=false,const char*tag=NULL){
     using namespace shv;
@@ -170,39 +277,227 @@ static int doSpawnPed(const char*modelName,float x,float y,float z,float h,int p
             // Extra configuration ONLY for remote (frozen) net peds.
             // Local spawns (F11, /spawncop, SRV welcome, etc.) keep behavior identical to v1.4.8.
             if(freeze){
-                wait(50);
-                Invoker(H_SET_MISSION).argi(np).argb(true).argb(true).retv();
+                // FiveM-style remote clone: mission entity, no AI, no ragdoll panic,
+                // collision on, not frozen solid (we drive coords via interpolation).
+                const uint64_t H_BLOCK_EVENTS = 0x9F8AA94D6D97DBF4ULL; // SET_BLOCKING_OF_NON_TEMPORARY_EVENTS
+                const uint64_t H_SET_CAN_RAGDOLL = 0xB128377056A54E2AULL; // SET_PED_CAN_RAGDOLL
+                const uint64_t H_SET_RAGDOLL_ON_COLLISION = 0xF99F1F3B5A9D2E5EULL; // may no-op if hash wrong
+                const uint64_t H_SET_COMBAT_ATTR = 0x9F7794730795E019ULL; // SET_PED_COMBAT_ATTRIBUTES
+                const uint64_t H_SET_FLEE_ATTR = 0x70A2D1137C8ED7C9ULL; // SET_PED_FLEE_ATTRIBUTES
+                const uint64_t H_SET_CAN_BE_TARGETTED = 0x63F58F7C80513AADULL; // SET_PED_CAN_BE_TARGETTED
+                const uint64_t H_SET_CAN_BE_TARGETTED_BY_PLAYER = 0x4328652AE5769C71ULL;
+                const uint64_t H_SET_ENTITY_COLLISION = 0x1A9205C1B9EE827FULL;
+                const uint64_t H_SET_ENTITY_VISIBLE = 0xEA1C610A04DB6BBBULL;
+                const uint64_t H_SET_PED_CONFIG_FLAG = 0x1913FE4CBF41C463ULL;
+                const uint64_t H_TASK_STAND = 0x919BE13EED931959ULL; // TASK_STAND_STILL
+                const uint64_t H_SET_PED_DIES_WHEN_INJURED = 0x5BA7919BED300023ULL;
                 wait(30);
-                Invoker(H_FREEZE).argi(np).argb(true).retv();
+                Invoker(H_SET_MISSION).argi(np).argb(true).argb(true).retv();
                 wait(0);
-                Invoker(H_SET_INVINCIBLE).argi(np).argb(true).retv();
+                Invoker(H_BLOCK_EVENTS).argi(np).argb(true).retv();
                 wait(0);
-                Invoker(H_SET_COORDS).argi(np).argf(x).argf(y).argf(z).argb(false).argb(false).argb(true).retv();
+                // Keep unfrozen so animation/look isn't locked; we still set coords each tick
+                Invoker(H_FREEZE).argi(np).argb(false).retv();
+                wait(0);
+                Invoker(H_SET_INVINCIBLE).argi(np).argb(true).retv(); // damage lands in Phase 8
+                wait(0);
+                Invoker(H_SET_CAN_RAGDOLL).argi(np).argb(false).retv();
+                wait(0);
+                Invoker(H_SET_CAN_BE_TARGETTED).argi(np).argb(true).retv();
+                wait(0);
+                Invoker(H_SET_ENTITY_COLLISION).argi(np).argb(true).argb(false).retv();
+                wait(0);
+                Invoker(H_SET_ENTITY_VISIBLE).argi(np).argb(true).argb(false).retv();
+                wait(0);
+                // Disable ambient reactions / panic (config flags used by multiplayer clones)
+                Invoker(H_SET_PED_CONFIG_FLAG).argi(np).argi(208).argb(true).retv(); // disable pain audio spam
+                Invoker(H_SET_PED_CONFIG_FLAG).argi(np).argi(281).argb(true).retv(); // disable writhe
+                wait(0);
+                Invoker(H_SET_FLEE_ATTR).argi(np).argi(0).argb(false).retv();
+                wait(0);
+                Invoker(H_SET_COMBAT_ATTR).argi(np).argi(46).argb(false).retv();
+                wait(0);
+                Invoker(H_SET_COORDS).argi(np).argf(x).argf(y).argf(z).argb(false).argb(false).argb(false).retv();
                 wait(0);
                 Invoker(H_SET_HEADING).argi(np).argf(h).retv();
-                wait(50);
-                logf("spawn: ped %d configured as remote (frozen, warped to %.1f,%.1f,%.1f h=%.1f)",np,x,y,z,h);
+                wait(0);
+                Invoker(H_TASK_STAND).argi(np).argi(86400000).retv();
+                wait(30);
+                logf("spawn: ped %d configured as FiveM-style remote clone @ %.1f,%.1f,%.1f h=%.1f",np,x,y,z,h);
             }
         }
         Invoker(H_SET_MODEL_NO).argh(m).retv();
     }
     return np;
 }
+static float lerpAng(float a, float b, float t){
+    float d = fmodf(b - a + 540.f, 360.f) - 180.f;
+    return a + d * t;
+}
 static void processNetPeds(DWORD now){
     using namespace shv;
-    const uint64_t H_SET_COORDS=0x239A3351AC1DA385ULL,H_SET_HEADING=0x8E2530AA8ADA980EULL,H_DOES_ENTITY_EXIST=0x7239B21A38F536BAULL;
+    // SET_ENTITY_COORDS_NO_OFFSET keeps feet planted better for clones
+    const uint64_t H_SET_COORDS_NO_OFFSET = 0x239A3351AC1DA385ULL; // SET_ENTITY_COORDS (same family; no-offset variant below)
+    const uint64_t H_SET_COORDS = 0x239A3351AC1DA385ULL;
+    const uint64_t H_SET_HEADING = 0x8E2530AA8ADA980EULL;
+    const uint64_t H_DOES_ENTITY_EXIST = 0x7239B21A38F536BAULL;
+    const uint64_t H_SET_ENTITY_VISIBLE = 0xEA1C610A04DB6BBBULL;
+    const uint64_t H_IS_ENTITY_VISIBLE = 0x47D6F43D77935C75ULL;
+    const float STREAM_IN = 300.f;   // FiveM-ish player scope (meters)
+    const float STREAM_OUT = 320.f;
+    float myx=g_shvLastPedCoords.x, myy=g_shvLastPedCoords.y, myz=g_shvLastPedCoords.z;
     for(int i=0;i<NET_PED_MAX;i++){
         NetPed*np=&g_netPeds[i];
-        if(!np->used)continue;
-        // Expire if no update in 6s
-        if(np->lastUpdate!=0 && now-np->lastUpdate>6000){logf("netPed: id=%s timed out (%.1fs), removing",np->id,(now-np->lastUpdate)/1000.0);deleteNetPed_SHV(np);i--;continue;}
-        if(!np->ped)continue;
+        if(!np->used) continue;
+        // Soft timeout — no net update (disconnect / stream drop)
+        if(np->lastUpdate!=0 && now-np->lastUpdate>8000){
+            logf("netPed: id=%s timed out — despawn (FiveM leave)", np->id);
+            deleteNetPed_SHV(np, true);
+            i--; continue;
+        }
+        float dx=np->pos.x-myx, dy=np->pos.y-myy, dz=np->pos.z-myz;
+        float dist = sqrtf(dx*dx+dy*dy+dz*dz);
+        // Stream out far players (hide + no tick) like FiveM entity culling
+        if(dist > STREAM_OUT){
+            if(np->ped && np->visible){
+                Invoker(H_SET_ENTITY_VISIBLE).argi(np->ped).argb(false).argb(false).retv();
+                np->visible = 0;
+            }
+            continue;
+        }
+        if(!np->ped){
+            // Entity missing — request respawn once (debounce via wantRespawn flag)
+            if(np->model[0] && g_shvReady && !np->spawnQueued){
+                np->wantRespawn = 1;
+                np->spawnQueued = 1;
+                NpCmd c={0}; c.op=NQ_SPAWN;
+                sstrcpy(c.id,np->id,sizeof(c.id));
+                sstrcpy(c.name,np->name,sizeof(c.name));
+                sstrcpy(c.model,np->model,sizeof(c.model));
+                c.x=np->pos.x; c.y=np->pos.y; c.z=np->pos.z; c.h=np->h;
+                queueNpCmd(&c);
+                logf("net: auto-respawn queued id=%s", np->id);
+            }
+            continue;
+        }
         int exists=Invoker(H_DOES_ENTITY_EXIST).argi(np->ped).reti();
-        if(!exists){logf("netPed: id=%s ped=%d no longer exists, clearing handle (will respawn)",np->id,np->ped);np->ped=0;continue;}
-        Invoker(H_SET_COORDS).argi(np->ped).argf(np->pos.x).argf(np->pos.y).argf(np->pos.z).argb(false).argb(false).argb(false).retv();
-        Invoker(H_SET_HEADING).argi(np->ped).argf(np->h).retv();
+        if(!exists){
+            logf("netPed: id=%s ped vanished — will respawn", np->id);
+            np->ped=0; np->blip=0; np->wantRespawn=1; continue;
+        }
+        if(dist < STREAM_IN && !np->visible){
+            Invoker(H_SET_ENTITY_VISIBLE).argi(np->ped).argb(true).argb(false).retv();
+            np->visible = 1;
+        }
+        // Smooth interpolation toward network target (FiveM-style client blend)
+        // alpha ~0.25 at 60fps feels responsive without rubber-banding hard
+        const float a = 0.28f;
+        np->drawPos.x += (np->pos.x - np->drawPos.x) * a;
+        np->drawPos.y += (np->pos.y - np->drawPos.y) * a;
+        np->drawPos.z += (np->pos.z - np->drawPos.z) * a;
+        np->drawH = lerpAng(np->drawH, np->h, a);
+        // Snap if teleported far
+        float tdx=np->pos.x-np->drawPos.x, tdy=np->pos.y-np->drawPos.y, tdz=np->pos.z-np->drawPos.z;
+        if(tdx*tdx+tdy*tdy+tdz*tdz > 25.f*25.f){
+            np->drawPos = np->pos;
+            np->drawH = np->h;
+        }
+        Invoker(H_SET_COORDS).argi(np->ped).argf(np->drawPos.x).argf(np->drawPos.y).argf(np->drawPos.z)
+            .argb(false).argb(false).argb(false).retv();
+        Invoker(H_SET_HEADING).argi(np->ped).argf(np->drawH).retv();
+        (void)H_SET_COORDS_NO_OFFSET;
+        (void)H_IS_ENTITY_VISIBLE;
     }
 }
+// GET_SCREEN_COORD_FROM_WORLD_COORD — push two float* outs via Invoker::argp
+static bool worldToScreen(float x, float y, float z, float* sx, float* sy){
+    using namespace shv;
+    const uint64_t H_W2S = 0x34E82F05DF2974F5ULL;
+    float ox=0.f, oy=0.f;
+    int ok = Invoker(H_W2S).argf(x).argf(y).argf(z).argp(&ox).argp(&oy).reti();
+    if(sx) *sx = ox; if(sy) *sy = oy;
+    return ok != 0;
+}
+static void drawText2d(const char* msg, float x, float y, float scale, int r, int g, int b, int a, bool centre){
+    using namespace shv;
+    if(!msg||!*msg) return;
+    const uint64_t H_SET_SCALE = 0x07C837F9A01C34C9ULL;
+    const uint64_t H_SET_COLOUR = 0xBE6B23FFA53FB442ULL;
+    const uint64_t H_SET_CENTRE = 0xC02F4DBFB51D988BULL;
+    const uint64_t H_SET_OUTLINE = 0x2513DFB0FB8400FEULL;
+    const uint64_t H_SET_FONT = 0x66E0276CC5F6B9DAULL;
+    const uint64_t H_SET_WRAP = 0x63145D9C883A1A70ULL;
+    const uint64_t H_BEGIN = 0x25FBB336DF1804CBULL;
+    const uint64_t H_ADD = 0x6C188BE134E074AAULL;
+    const uint64_t H_END = 0xCD015E5BB0D96A57ULL;
+    Invoker(H_SET_FONT).argi(4).retv();
+    Invoker(H_SET_SCALE).argf(scale).argf(scale).retv();
+    Invoker(H_SET_COLOUR).argi(r).argi(g).argi(b).argi(a).retv();
+    Invoker(H_SET_CENTRE).argb(centre).retv();
+    Invoker(H_SET_OUTLINE).retv();
+    Invoker(H_SET_WRAP).argf(0.0f).argf(1.0f).retv();
+    Invoker(H_BEGIN).argp((void*)"STRING").retv();
+    Invoker(H_ADD).argp((void*)msg).retv();
+    Invoker(H_END).argf(x).argf(y).retv();
+}
+// Phase 6: FiveM-style nametags — "[id] name" above head, distance scaled, LOS-ish range
+static void drawNametags(){
+    float myx=g_shvLastPedCoords.x, myy=g_shvLastPedCoords.y, myz=g_shvLastPedCoords.z;
+    for(int i=0;i<NET_PED_MAX;i++){
+        NetPed*np=&g_netPeds[i];
+        if(!np->used || !np->name[0]) continue;
+        if(!np->visible && np->ped) continue;
+        Vec3 p = (np->drawPos.x!=0.f||np->drawPos.y!=0.f||np->drawPos.z!=0.f) ? np->drawPos : np->pos;
+        if(p.x==0.f && p.y==0.f && p.z==0.f) continue;
+        float wx=p.x, wy=p.y, wz=p.z + 1.0f;
+        float dx=wx-myx, dy=wy-myy, dz=wz-myz;
+        float dist2=dx*dx+dy*dy+dz*dz;
+        // FiveM default nametag range is roughly speaking distance (~25m tight, we allow 40m)
+        if(dist2 > 40.f*40.f) continue;
+        float sx=0.f, sy=0.f;
+        if(!worldToScreen(wx,wy,wz,&sx,&sy)) continue;
+        if(sx < -0.05f || sx > 1.05f || sy < -0.05f || sy > 1.05f) continue;
+        float dist = sqrtf(dist2);
+        float scale = dist < 8.f ? 0.40f : (dist < 20.f ? 0.34f : 0.28f);
+        int hp = np->health > 0 ? np->health : 200;
+        // White name like FiveM; slight health tint only when hurt
+        int r=255, g=255, b=255;
+        if(hp < 100){ r=255; g=160; b=160; }
+        else if(hp < 150){ r=255; g=230; b=180; }
+        char label[64];
+        if(np->serverId > 0)
+            snprintf(label, sizeof(label), "[%d] %s", np->serverId, np->name);
+        else
+            snprintf(label, sizeof(label), "%s", np->name);
+        int a = np->ped ? 240 : 170;
+        drawText2d(label, sx, sy, scale, r, g, b, a, true);
+        // Talking / health under-bar approximation: thin second line with HP%
+        if(dist < 25.f){
+            char sub[32];
+            int pct = hp > 200 ? 100 : (hp * 100) / 200;
+            snprintf(sub, sizeof(sub), "HP %d%%", pct);
+            drawText2d(sub, sx, sy + 0.018f, scale * 0.75f, 180, 220, 180, a - 40, true);
+        }
+    }
+}
+// Phase 7: recent chat lines + F8 input box
+static void drawChatUI(){
+    DWORD now = timeGetTime();
+    float y = 0.70f;
+    for(int i=0;i<g_chatLogN;i++){
+        ChatLine* L=&g_chatLog[i];
+        if(!g_chatOpen && (now - L->born > 12000)) continue;
+        drawText2d(L->text, 0.02f, y, 0.35f, L->r, L->g, L->b, 230, false);
+        y += 0.024f;
+    }
+    if(g_chatOpen){
+        char buf[CHAT_INPUT_MAX+8];
+        snprintf(buf, sizeof(buf), "> %s_", g_chatInput);
+        drawText2d(buf, 0.02f, 0.93f, 0.40f, 255, 255, 120, 255, false);
+        drawText2d("F8 chat | Enter send | Esc cancel", 0.02f, 0.96f, 0.28f, 180, 180, 180, 200, false);
+    }
+}
+
 static void __cdecl shvScriptMain(){
     logf("SHV scriptMain: entered (v" HOOK_VER ")");using namespace shv;
     const uint64_t H_PLAYER_ID=0x4F8644AF03D0E0D6ULL,H_PPID=0xD80958FC74E988A6ULL,H_GEC=0x3FEF770D40960D5AULL,H_GEH=0xE83D4F9BA2A38914ULL;
@@ -211,6 +506,56 @@ static void __cdecl shvScriptMain(){
         if(!g_localPed){static DWORD lt=0;if(now-lt>500){lt=now;pidx=Invoker(H_PLAYER_ID).reti();int p=Invoker(H_PPID).reti();if(p&&timeGetTime()-t0>8000){g_localPed=p;g_shvReady=true;logf("SHV READY: playerIdx=%d ped=0x%X (uptime=%ums) netPeds=%d",pidx,p,(unsigned)(timeGetTime()-t0),g_netPedCount);strcpy_s(g_f.err,"Scanning mem for ped...");sendJson("{\"t\":\"ready\",\"ped\":%d,\"uptime\":%lu}",p,(unsigned long)(timeGetTime()-t0));}else{static DWORD ll=0;if(now-ll>3000){ll=now;logf("SHV: waiting for ped... t=%ums p=%d",(unsigned)(timeGetTime()-t0),p);}}}continue;}
         // Apply remote-ped movement every tick (smooth)
         if(now-lastNetTick>16){lastNetTick=now;processNetPeds(now);}
+        // Phase 6+7: nametags + chat HUD every frame (text natives are cheap)
+        drawNametags();
+        drawChatUI();
+        // F8 toggles chat input (edge-trigger via static debounce)
+        {
+            static bool f8Was=false, escWas=false, retWas=false, bkWas=false;
+            bool f8 = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
+            if(f8 && !f8Was){
+                g_chatOpen = !g_chatOpen;
+                if(g_chatOpen){ g_chatOpenAt=now; g_chatInput[0]=0; g_chatInputLen=0; logf("chat: opened"); }
+                else { logf("chat: closed"); }
+                Sleep(0);
+            }
+            f8Was=f8;
+            if(g_chatOpen){
+                bool esc=(GetAsyncKeyState(VK_ESCAPE)&0x8000)!=0;
+                if(esc && !escWas){ g_chatOpen=false; g_chatInput[0]=0; g_chatInputLen=0; }
+                escWas=esc;
+                bool ret=(GetAsyncKeyState(VK_RETURN)&0x8000)!=0;
+                if(ret && !retWas){ submitChat(); }
+                retWas=ret;
+                bool bk=(GetAsyncKeyState(VK_BACK)&0x8000)!=0;
+                if(bk && !bkWas && g_chatInputLen>0){ g_chatInput[--g_chatInputLen]=0; }
+                bkWas=bk;
+                // Poll printable keys A-Z, 0-9, space, basic punct via GetAsyncKeyState
+                // Use ToUnicode for proper chars when possible
+                static SHORT prev[256]; 
+                for(int vk=8; vk<256; vk++){
+                    if(vk==VK_F8||vk==VK_ESCAPE||vk==VK_RETURN||vk==VK_BACK||vk==VK_SHIFT||vk==VK_CONTROL||vk==VK_MENU||vk==VK_LWIN||vk==VK_RWIN) continue;
+                    SHORT st = GetAsyncKeyState(vk);
+                    bool down = (st & 0x8000)!=0;
+                    bool was = (prev[vk] & 0x8000)!=0;
+                    prev[vk]=st;
+                    if(!(down && !was)) continue;
+                    // translate
+                    BYTE kb[256]; GetKeyboardState(kb);
+                    // force key down bit for ToUnicode
+                    WCHAR chars[4]={0};
+                    int n = ToUnicode((UINT)vk, MapVirtualKeyA((UINT)vk, MAPVK_VK_TO_VSC), kb, chars, 4, 0);
+                    if(n<=0) continue;
+                    for(int ci=0; ci<n; ci++){
+                        wchar_t wc=chars[ci];
+                        if(wc < 32 || wc > 126) continue; // basic ASCII chat
+                        if(g_chatInputLen >= CHAT_INPUT_MAX) break;
+                        g_chatInput[g_chatInputLen++] = (char)wc;
+                        g_chatInput[g_chatInputLen]=0;
+                    }
+                }
+            }
+        }
         // Drain net-ped command queue (spawn/del/clear) — SHV fiber ONLY, one cmd per tick.
         EnterCriticalSection(&g_npCs);
         bool hasNp=(g_npTail!=g_npHead);
@@ -220,18 +565,60 @@ static void __cdecl shvScriptMain(){
         if(hasNp){
             if(nc.op==NQ_SPAWN){
                 NetPed*np=findNetPed(nc.id);
-                if(np&&!np->ped){
-                    char tag[64];snprintf(tag,sizeof(tag),"[remote %s]",nc.id);
-                    int ped=doSpawnPed(nc.model[0]?nc.model:"s_m_y_cop_01",nc.x,nc.y,nc.z,nc.h,6,true,tag);
-                    if(ped){np->ped=ped;g_shvSpawnCount++;logf("net: spawned remote ped id=%s -> ped=%d",nc.id,ped);sendJson("{\"t\":\"netPedSpawned\",\"id\":\"%s\",\"ped\":%d}",nc.id,ped);}
-                    else logf("net: FAILED to spawn remote ped id=%s",nc.id);
+                if(!np){
+                    // Slot may have been wiped; recreate bookkeeping
+                    np=allocNetPed();
+                    if(np){ sstrcpy(np->id,nc.id,sizeof(np->id)); }
+                }
+                if(!np){ logf("net: SPAWN drop id=%s (table full)", nc.id); }
+                else if(np->ped && !np->wantRespawn){
+                    // Already have clone — refresh target pose (FiveM entity update)
+                    np->pos.x=nc.x; np->pos.y=nc.y; np->pos.z=nc.z; np->h=nc.h;
+                    if(np->drawPos.x==0&&np->drawPos.y==0&&np->drawPos.z==0){ np->drawPos=np->pos; np->drawH=np->h; }
+                    if(nc.name[0]) sstrcpy(np->name,nc.name,sizeof(np->name));
+                    if(nc.model[0]) sstrcpy(np->model,nc.model,sizeof(np->model));
+                    np->lastUpdate=timeGetTime();
+                } else {
+                    // Create FiveM-style remote player ped
+                    if(np->ped && np->wantRespawn){
+                        deleteNetPed_SHV(np, false); // entity only
+                    }
+                    char tag[64];snprintf(tag,sizeof(tag),"[player %s]",nc.id);
+                    if(nc.name[0]) sstrcpy(np->name,nc.name,sizeof(np->name));
+                    if(nc.model[0]) sstrcpy(np->model,nc.model,sizeof(np->model));
+                    np->pos.x=nc.x; np->pos.y=nc.y; np->pos.z=nc.z; np->h=nc.h;
+                    np->drawPos=np->pos; np->drawH=np->h;
+                    // Parse server id from "p12"
+                    if(np->serverId<=0 && nc.id[0]=='p') np->serverId = atoi(nc.id+1);
+                    int ped=doSpawnPed(np->model[0]?np->model:"mp_m_freemode_01",nc.x,nc.y,nc.z,nc.h,4,true,tag);
+                    if(ped){
+                        np->ped=ped; np->wantRespawn=0; np->spawnQueued=0; np->visible=1; g_shvSpawnCount++;
+                        np->blip = addPlayerBlip_SHV(ped, np->name);
+                        np->lastUpdate=timeGetTime();
+                        logf("net: FiveM SPAWN id=%s name=%s sid=%d -> ped=%d blip=%d",nc.id,np->name,np->serverId,ped,np->blip);
+                        sendJson("{\"t\":\"netPedSpawned\",\"id\":\"%s\",\"ped\":%d,\"name\":\"%s\"}",nc.id,ped,np->name);
+                        {char jl[96];snprintf(jl,sizeof(jl),"+ %s joined", np->name[0]?np->name:nc.id);pushChatLine(jl,140,200,255);}
+                    } else { np->spawnQueued=0; logf("net: FiveM FAILED spawn id=%s model=%s",nc.id,np->model); }
                 }
             }else if(nc.op==NQ_DEL){
                 NetPed*np=findNetPed(nc.id);
-                if(np)deleteNetPed_SHV(np);
+                if(np){
+                    // wantRespawn means model swap — soft delete. Else player left.
+                    bool hard = !np->wantRespawn;
+                    if(hard){
+                        char jl[96];snprintf(jl,sizeof(jl),"- %s left", np->name[0]?np->name:np->id);
+                        pushChatLine(jl,255,160,120);
+                    }
+                    deleteNetPed_SHV(np, hard);
+                    if(!hard) np->wantRespawn = 1; // keep flag for following SPAWN
+                }
             }else if(nc.op==NQ_CLEAR){
-                logf("net: clearing all remote peds (%d)",g_netPedCount);
-                for(int i=0;i<NET_PED_MAX;i++){if(g_netPeds[i].used){NetPed*np=&g_netPeds[i];if(np->ped)deleteNetPed_SHV(np);else{memset(np,0,sizeof(NetPed));g_netPedCount--;}i--;}}
+                logf("net: clearing all remote players (%d)",g_netPedCount);
+                for(int i=0;i<NET_PED_MAX;i++){
+                    if(!g_netPeds[i].used) continue;
+                    deleteNetPed_SHV(&g_netPeds[i], true);
+                    i--;
+                }
             }
             wait(0);
         }
@@ -275,10 +662,15 @@ static BOOL CALLBACK enumCb(HWND w,LPARAM lp){EnumData*d=(EnumData*)lp;DWORD pid
 static HWND findGtaWnd(){EnumData d={g_pid,NULL};EnumWindows(enumCb,(LPARAM)&d);return d.wnd;}
 static LRESULT CALLBACK wndProc(HWND w,UINT m,WPARAM a,LPARAM b){
     if(m==WM_PAINT){PAINTSTRUCT ps;HDC dc=BeginPaint(w,&ps);HBRUSH kb=CreateSolidBrush(OVERLAY_KEY);RECT rc;GetClientRect(w,&rc);FillRect(dc,&rc,kb);DeleteObject(kb);RECT br={8,8,700,240};HBRUSH b2=CreateSolidBrush(RGB(18,10,2));FillRect(dc,&br,b2);DeleteObject(b2);HPEN pn=CreatePen(PS_SOLID,1,RGB(240,120,40));HGDIOBJ po=SelectObject(dc,pn);MoveToEx(dc,br.left,br.top,NULL);LineTo(dc,br.right,br.top);LineTo(dc,br.right,br.bottom);LineTo(dc,br.left,br.bottom);LineTo(dc,br.left,br.top);SelectObject(dc,po);DeleteObject(pn);SetBkMode(dc,TRANSPARENT);
-    HFONT f1=CreateFontA(22,0,0,0,FW_BOLD,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,"Segoe UI");HFONT f2=CreateFontA(13,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,"Segoe UI");HFONT of=(HFONT)SelectObject(dc,f1);SetTextColor(dc,RGB(240,120,40));char hdr[80];snprintf(hdr,sizeof(hdr),"GTAMP v%s  -  PHASE 5 REMOTE PLAYER SYNC (SHV fiber fix)",HOOK_VER);TextOutA(dc,20,16,hdr,(int)strlen(hdr));SelectObject(dc,f2);char ln[320];SetTextColor(dc,RGB(220,224,232));snprintf(ln,sizeof(ln),"Build: %s   F9=toggle F10=rescan F11=spawn cop",g_ver[0]?g_ver:"?");TextOutA(dc,20,46,ln,(int)strlen(ln));
+    HFONT f1=CreateFontA(22,0,0,0,FW_BOLD,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,"Segoe UI");HFONT f2=CreateFontA(13,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,"Segoe UI");HFONT of=(HFONT)SelectObject(dc,f1);SetTextColor(dc,RGB(240,120,40));char hdr[80];snprintf(hdr,sizeof(hdr),"GTAMP v%s  -  Phase 6 remote players (FiveM-style)",HOOK_VER);TextOutA(dc,20,16,hdr,(int)strlen(hdr));SelectObject(dc,f2);char ln[320];SetTextColor(dc,RGB(220,224,232));snprintf(ln,sizeof(ln),"Build: %s   F8 chat | F9 hud | players sync like FiveM",g_ver[0]?g_ver:"?");TextOutA(dc,20,46,ln,(int)strlen(ln));
     if(shv::loaded()){COLORREF c=g_shvReady?RGB(120,220,120):RGB(255,200,80);SetTextColor(dc,c);snprintf(ln,sizeof(ln),"ScriptHookV: OK  script=%s  spawns=%d  remotePeds=%d",g_shvReady?"ready":"starting up",g_shvSpawnCount,g_netPedCount);}else{SetTextColor(dc,RGB(255,160,80));snprintf(ln,sizeof(ln),"ScriptHookV.dll NOT FOUND");}TextOutA(dc,20,64,ln,(int)strlen(ln));
-    if(g_shvReady&&g_f.found){SetTextColor(dc,RGB(180,220,255));snprintf(ln,sizeof(ln),"PED @ %p  (+0x90)  mem: %.1f,%.1f,%.1f",(void*)g_f.ped,g_f.pos.x,g_f.pos.y,g_f.pos.z);TextOutA(dc,20,88,ln,(int)strlen(ln));SetTextColor(dc,RGB(180,255,180));snprintf(ln,sizeof(ln),"SHV pos: %.1f,%.1f,%.1f  h=%.1f deg  hp=%d",g_shvLastPedCoords.x,g_shvLastPedCoords.y,g_shvLastPedCoords.z,g_shvLastHeading,g_f.hp);TextOutA(dc,20,108,ln,(int)strlen(ln));SetTextColor(dc,RGB(180,180,180));TextOutA(dc,20,128,g_f.why,(int)strlen(g_f.why));if(g_shvMsg[0]){SetTextColor(dc,RGB(255,220,120));TextOutA(dc,20,148,g_shvMsg,(int)strlen(g_shvMsg));}SetTextColor(dc,RGB(140,200,255));snprintf(ln,sizeof(ln),"Bridge: %s   Remote players online: %d",g_sock!=INVALID_SOCKET?"connected":"waiting",g_netPedCount);TextOutA(dc,20,180,ln,(int)strlen(ln));}else{SetTextColor(dc,RGB(255,200,120));TextOutA(dc,20,88,g_shvReady?"Local ped: scanning memory...":"Waiting for GTA to load...",g_shvReady?33:29);SetTextColor(dc,RGB(180,180,180));TextOutA(dc,20,108,g_f.err,(int)strlen(g_f.err));}
-    SetTextColor(dc,RGB(220,180,90));TextOutA(dc,20,200,"F11 or Spawn Cop button = cop 3m in front",42);SelectObject(dc,of);DeleteObject(f1);DeleteObject(f2);EndPaint(w,&ps);return 0;}if(m==WM_DESTROY){g_ov=NULL;return 0;}return DefWindowProcA(w,m,a,b);
+    if(g_shvReady&&g_f.found){SetTextColor(dc,RGB(180,220,255));snprintf(ln,sizeof(ln),"PED @ %p  (+0x90)  mem: %.1f,%.1f,%.1f",(void*)g_f.ped,g_f.pos.x,g_f.pos.y,g_f.pos.z);TextOutA(dc,20,88,ln,(int)strlen(ln));SetTextColor(dc,RGB(180,255,180));snprintf(ln,sizeof(ln),"SHV pos: %.1f,%.1f,%.1f  h=%.1f deg  hp=%d",g_shvLastPedCoords.x,g_shvLastPedCoords.y,g_shvLastPedCoords.z,g_shvLastHeading,g_f.hp);TextOutA(dc,20,108,ln,(int)strlen(ln));SetTextColor(dc,RGB(180,180,180));TextOutA(dc,20,128,g_f.why,(int)strlen(g_f.why));if(g_shvMsg[0]){SetTextColor(dc,RGB(255,220,120));TextOutA(dc,20,148,g_shvMsg,(int)strlen(g_shvMsg));}SetTextColor(dc,RGB(140,200,255));snprintf(ln,sizeof(ln),"Bridge: %s   Remote players: %d",g_sock!=INVALID_SOCKET?"connected":"waiting",g_netPedCount);TextOutA(dc,20,180,ln,(int)strlen(ln));
+        // Phase 6: list remote names under bridge line
+        { int yy=198; SetTextColor(dc,RGB(200,220,255));
+          for(int i=0;i<NET_PED_MAX && yy<230;i++){ if(!g_netPeds[i].used) continue;
+            char rl[96]; snprintf(rl,sizeof(rl), "  %s  ped=%d  hp=%d", g_netPeds[i].name[0]?g_netPeds[i].name:g_netPeds[i].id, g_netPeds[i].ped, g_netPeds[i].health);
+            TextOutA(dc,20,yy,rl,(int)strlen(rl)); yy+=14; } }}else{SetTextColor(dc,RGB(255,200,120));TextOutA(dc,20,88,g_shvReady?"Local ped: scanning memory...":"Waiting for GTA to load...",g_shvReady?33:29);SetTextColor(dc,RGB(180,180,180));TextOutA(dc,20,108,g_f.err,(int)strlen(g_f.err));}
+    SetTextColor(dc,RGB(220,180,90));TextOutA(dc,20,200,"F8 chat | F9 overlay | F11 spawn cop 3m ahead",48);SelectObject(dc,of);DeleteObject(f1);DeleteObject(f2);EndPaint(w,&ps);return 0;}if(m==WM_DESTROY){g_ov=NULL;return 0;}return DefWindowProcA(w,m,a,b);
 }
 static DWORD WINAPI overlayThread(LPVOID){logf("overlay start");HINSTANCE hi=(HINSTANCE)GetModuleHandleA(NULL);WNDCLASSEXA wc={0};wc.cbSize=sizeof(wc);wc.lpfnWndProc=wndProc;wc.hInstance=hi;wc.hbrBackground=CreateSolidBrush(OVERLAY_KEY);wc.lpszClassName=OV_CLASS;RegisterClassExA(&wc);for(int i=0;i<200&&g_running;i++){g_gta=findGtaWnd();if(g_gta)break;Sleep(100);}if(g_gta){char t[96]={0};GetWindowTextA(g_gta,t,96);logf("GTA hwnd=%p '%s'",(void*)g_gta,t);}g_ov=CreateWindowExA(WS_EX_TOPMOST|WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,OV_CLASS,"GTAMP",WS_POPUP|WS_VISIBLE,0,0,720,240,NULL,NULL,hi,NULL);if(g_ov){SetLayeredWindowAttributes(g_ov,OVERLAY_KEY,255,LWA_COLORKEY|LWA_ALPHA);logf("overlay %p",(void*)g_ov);}strcpy_s(g_f.err,"Waiting for SHV ready...");MSG m;DWORD la=timeGetTime();
     while(g_running){while(PeekMessageA(&m,NULL,0,0,PM_REMOVE)){TranslateMessage(&m);DispatchMessageA(&m);}if(!g_gta||!IsWindow(g_gta))g_gta=findGtaWnd();if(g_gta&&IsWindow(g_gta)&&g_ov){RECT g;if(IsWindowVisible(g_gta)&&GetWindowRect(g_gta,&g)){SetWindowPos(g_ov,HWND_TOPMOST,g.left+16,g.top+16,720,240,SWP_NOACTIVATE|SWP_SHOWWINDOW|SWP_NOOWNERZORDER);ShowWindow(g_ov,g_vis?SW_SHOWNOACTIVATE:SW_HIDE);InvalidateRect(g_ov,NULL,FALSE);}}if(GetAsyncKeyState(VK_F9)&1){g_vis=!g_vis;logf("overlay %s",g_vis?"on":"off");Sleep(250);}if(GetAsyncKeyState(VK_F10)&1){if(g_shvReady){logf("rescan (F10)");g_f.found=false;la=timeGetTime()-2000;doScan();}Sleep(250);}if(GetAsyncKeyState(VK_F11)&1){if(shv::loaded()){logf("F11 pressed - queuing local cop spawn (shvReady=%d)",(int)g_shvReady);SpawnReq r={0};strcpy_s(r.src,"F11");strcpy_s(r.model,"s_m_y_cop_01");r.useOffset=true;r.pedType=6;queueSpawn(&r);if(!g_shvReady)snprintf(g_shvMsg,sizeof(g_shvMsg),"F11 queued - will spawn once loaded");}else{logf("F11 pressed but SHV not loaded");snprintf(g_shvMsg,sizeof(g_shvMsg),"Waiting for ScriptHookV...");}Sleep(500);}DWORD now=timeGetTime();if(g_shvReady&&!g_f.found&&now-la>1500){la=now;doScan();}Sleep(25);}if(g_ov)DestroyWindow(g_ov);UnregisterClassA(OV_CLASS,hi);return 0;
@@ -287,6 +679,22 @@ static void connectBridge(){g_sock=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);socka
 // Net-thread: parse packet and update NetPed bookkeeping ONLY.
 // Any native call (spawn/delete/move) is queued for the SHV fiber.
 static void handleNetLine(const char*l){int ln=(int)strlen(l);if(ln<5)return;
+    // Phase 7: incoming chat display
+    if(strstr(l,"\"chat\"") && (strstr(l,"\"t\":\"chat\"")||strstr(l,"\"t\": \"chat\""))){
+        int nl=0; const char* nv=jss(l,"name",&nl); char name[32]="SERVER";
+        if(nv&&nl>0){ memcpy(name,nv,nl<31?nl:31); name[nl<31?nl:31]=0; }
+        int ml=0; const char* mv=jss(l,"msg",&ml); char msg[CHAT_INPUT_MAX+1]={0};
+        if(mv&&ml>0){ int c=ml<CHAT_INPUT_MAX?ml:CHAT_INPUT_MAX; memcpy(msg,mv,c); msg[c]=0; }
+        if(msg[0]){
+            char line[280]; snprintf(line,sizeof(line),"%s: %s", name, msg);
+            unsigned char r=220,g=220,b=220;
+            if(!strcmp(name,"SERVER")||!strcmp(name,"JOIN")||!strcmp(name,"SYSTEM")){ r=120;g=220;b=140; }
+            pushChatLine(line,r,g,b);
+            logf("chat: recv [%s] %s", name, msg);
+        }
+        return;
+    }
+
     // netPedDel
     if(strstr(l,"\"netPedDel\"")){int il=0;const char*iv=jss(l,"id",&il);if(iv&&il>0){char id[32]={0};memcpy(id,iv,il<31?il:31);NpCmd c={0};c.op=NQ_DEL;sstrcpy(c.id,id,sizeof(c.id));queueNpCmd(&c);logf("net: queued del remote ped id=%s",id);}return;}
     // netPedClear
@@ -298,26 +706,82 @@ static void handleNetLine(const char*l){int ln=(int)strlen(l);if(ln<5)return;
         int ml=0;const char*mv=jss(l,"model",&ml);char model[64]="s_m_y_cop_01";if(mv&&ml>0&&ml<63){memcpy(model,mv,ml);model[ml]=0;}
         float x=0,y=0,z=0,h=0;jsf(l,"x",&x);jsf(l,"y",&y);jsf(l,"z",&z);jsf(l,"h",&h);
         bool isSpawn=!!strstr(l,"\"netPed\"")&&!strstr(l,"\"netPedPos\"");
+        float hf=200.f; jsf(l,"health",&hf); int health=(int)hf;
+        float af=0.f; jsf(l,"armour",&af); int armour=(int)af;
+        float vx=0,vy=0,vz=0; jsf(l,"vx",&vx); jsf(l,"vy",&vy); jsf(l,"vz",&vz);
+        int serverId=0; 
+        if(id[0]=='p') serverId = atoi(id+1);
+        else { float sid=0; if(jsf(l,"netId",&sid)) serverId=(int)sid; else if(jsf(l,"id",&sid) && sid>0) serverId=(int)sid; }
+
         EnterCriticalSection(&g_npCs);
         NetPed*np=findNetPed(id);
         bool newly=false;
-        if(!np){np=allocNetPed();if(!np){LeaveCriticalSection(&g_npCs);logf("net: netPed table full, dropping id=%s",id);return;}sstrcpy(np->id,id,sizeof(np->id));np->ped=0;newly=true;logf("net: new remote ped id=%s name='%s' model=%s at %.1f,%.1f,%.1f",id,name,model,x,y,z);}
+        bool modelChanged=false;
+        if(!np){
+            np=allocNetPed();
+            if(!np){LeaveCriticalSection(&g_npCs);logf("net: table full, drop id=%s",id);return;}
+            sstrcpy(np->id,id,sizeof(np->id));
+            np->ped=0; np->blip=0; newly=true;
+            np->drawPos.x=x; np->drawPos.y=y; np->drawPos.z=z; np->drawH=h;
+            logf("net: FiveM JOIN id=%s name='%s' model=%s sid=%d @ %.1f,%.1f,%.1f",id,name,model,serverId,x,y,z);
+        } else {
+            if(model[0] && np->model[0] && strcmp(np->model, model)!=0) modelChanged=true;
+        }
         sstrcpy(np->name,name,sizeof(np->name));
-        sstrcpy(np->model,model,sizeof(np->model));
-        np->pos.x=x;np->pos.y=y;np->pos.z=z;np->h=h;np->lastUpdate=timeGetTime();
-        bool needSpawn=(newly||!np->ped)&&g_shvReady;
+        if(model[0]) sstrcpy(np->model,model,sizeof(np->model));
+        np->pos.x=x; np->pos.y=y; np->pos.z=z; np->h=h;
+        np->vx=vx; np->vy=vy; np->vz=vz;
+        np->health=health; np->armour=armour;
+        if(serverId>0) np->serverId=serverId;
+        np->lastUpdate=timeGetTime();
+        if(newly){ np->drawPos=np->pos; np->drawH=np->h; }
+        // netPedPos = pose only. netPed / missing ped / model change = spawn once.
+        bool isPosOnly = !!strstr(l, "\"netPedPos\"");
+        if(modelChanged && np->ped){
+            np->wantRespawn = 1;
+            np->spawnQueued = 0;
+        }
+        // Normalize heading into 0..360 (bot was sending 500+)
+        while(np->h >= 360.f) np->h -= 360.f;
+        while(np->h < 0.f) np->h += 360.f;
+        bool needSpawn = false;
+        if(!isPosOnly || newly || !np->ped || np->wantRespawn){
+            // Only one in-flight spawn command per remote player
+            if(!np->ped && !np->spawnQueued && g_shvReady)
+                needSpawn = true;
+            else if(np->wantRespawn && !np->spawnQueued && g_shvReady)
+                needSpawn = true;
+            else if(!isPosOnly && newly && !np->spawnQueued && g_shvReady)
+                needSpawn = true;
+        }
+        if(needSpawn) np->spawnQueued = 1;
         LeaveCriticalSection(&g_npCs);
+
+        if(modelChanged){
+            NpCmd d={0}; d.op=NQ_DEL; sstrcpy(d.id,id,sizeof(d.id)); queueNpCmd(&d);
+            logf("net: model change id=%s -> %s", id, model);
+        }
         if(needSpawn){
-            NpCmd c={0};c.op=NQ_SPAWN;sstrcpy(c.id,id,sizeof(c.id));sstrcpy(c.name,name,sizeof(c.name));sstrcpy(c.model,model,sizeof(c.model));
-            c.x=x;c.y=y;c.z=z;c.h=h;
+            NpCmd c={0}; c.op=NQ_SPAWN;
+            sstrcpy(c.id,id,sizeof(c.id));
+            sstrcpy(c.name,name,sizeof(c.name));
+            sstrcpy(c.model,model[0]?model:"mp_m_freemode_01",sizeof(c.model));
+            c.x=x; c.y=y; c.z=z; c.h=h;
             queueNpCmd(&c);
-            logf("net: queued spawn remote ped id=%s",id);
+            logf("net: queue SPAWN once id=%s (posOnly=%d)", id, (int)isPosOnly);
         }
         return;
     }
     if(strstr(l,"\"spawnPed\"")||(strstr(l,"\"t\":\"spawn\"")&&!strstr(l,"\"spawned\""))){int ml=0;const char*mv=jss(l,"model",&ml);SpawnReq r={0};strcpy_s(r.src,"NET");int sl=0;const char*sv=jss(l,"src",&sl);if(sv&&sl>0&&sl<(int)sizeof(r.src)-1){memcpy(r.src,sv,sl);r.src[sl]=0;}if(mv&&ml>0&&ml<(int)sizeof(r.model)-1){memcpy(r.model,mv,ml);r.model[ml]=0;}else strcpy_s(r.model,"s_m_y_cop_01");bool off=jsb(l,"offset",false);if(strstr(l,"\"t\":\"spawn\"")&&!strstr(l,"spawnPed"))off=true;if(off){r.useOffset=true;}else{float x,y,z,h;if(!jsf(l,"x",&x)||!jsf(l,"y",&y)||!jsf(l,"z",&z)){logf("net: spawnPed missing coords, using offset");r.useOffset=true;}else{r.useOffset=false;r.x=x;r.y=y;r.z=z;r.h=jsf(l,"h",&h)?h:0.f;}}float ptf=0;r.pedType=jsf(l,"pedType",&ptf)?(int)ptf:6;queueSpawn(&r);if(!g_shvReady)logf("net: queued spawnPed src=%s model=%s (SHV not ready - queued)",r.src,r.model);else logf("net: queued spawnPed src=%s model=%s offset=%d",r.src,r.model,r.useOffset);}
 }
-static DWORD WINAPI netThread(LPVOID){logf("net start");WSADATA w;WSAStartup(MAKEWORD(2,2),&w);for(int i=0;i<60&&g_running;i++){connectBridge();if(g_sock!=INVALID_SOCKET)break;Sleep(500);}char rb[4096];int rbLen=0;while(g_running){if(g_sock!=INVALID_SOCKET){fd_set r;timeval tv={0,150000};FD_ZERO(&r);FD_SET(g_sock,&r);if(select(0,&r,NULL,NULL,&tv)>0){int n=recv(g_sock,rb+rbLen,(int)sizeof(rb)-1-rbLen,0);if(n<=0){logf("bridge closed");closesocket(g_sock);g_sock=INVALID_SOCKET;rbLen=0;}else{rbLen+=n;rb[rbLen]=0;char*st=rb;for(char*p=rb;p<rb+rbLen;p++){if(*p=='\n'){*p=0;char*line=st;while(*line=='\r'||*line==' ')line++;if(*line){logf("<- %s",line);handleNetLine(line);}st=p+1;}}if(st>rb){int rem=(int)(rb+rbLen-st);memmove(rb,st,rem);rbLen=rem;}else if(rbLen>=(int)sizeof(rb)-1){logf("net: line too long");rbLen=0;}}}}else{Sleep(500);connectBridge();}}if(g_sock!=INVALID_SOCKET){closesocket(g_sock);g_sock=INVALID_SOCKET;}WSACleanup();return 0;}
+static DWORD WINAPI netThread(LPVOID){logf("net start");WSADATA w;WSAStartup(MAKEWORD(2,2),&w);for(int i=0;i<60&&g_running;i++){connectBridge();if(g_sock!=INVALID_SOCKET)break;Sleep(500);}char rb[4096];int rbLen=0;while(g_running){if(g_sock!=INVALID_SOCKET){fd_set r;timeval tv={0,150000};FD_ZERO(&r);FD_SET(g_sock,&r);if(select(0,&r,NULL,NULL,&tv)>0){int n=recv(g_sock,rb+rbLen,(int)sizeof(rb)-1-rbLen,0);if(n<=0){logf("bridge closed");closesocket(g_sock);g_sock=INVALID_SOCKET;rbLen=0;}else{rbLen+=n;rb[rbLen]=0;char*st=rb;for(char*p=rb;p<rb+rbLen;p++){if(*p=='\n'){*p=0;char*line=st;while(*line=='\r'||*line==' ')line++;if(*line){
+                        // Rate-limit spammy netPedPos logs (still process every packet)
+                        if(strstr(line,"netPedPos")){
+                            static DWORD lastPosLog=0; DWORD tn=timeGetTime();
+                            if(tn-lastPosLog>2000){ lastPosLog=tn; logf("<- netPedPos ... (throttled)"); }
+                        } else logf("<- %s",line);
+                        handleNetLine(line);
+                    }st=p+1;}}if(st>rb){int rem=(int)(rb+rbLen-st);memmove(rb,st,rem);rbLen=rem;}else if(rbLen>=(int)sizeof(rb)-1){logf("net: line too long");rbLen=0;}}}}else{Sleep(500);connectBridge();}}if(g_sock!=INVALID_SOCKET){closesocket(g_sock);g_sock=INVALID_SOCKET;}WSACleanup();return 0;}
 static VOID WINAPI delayedShvLoad(PVOID){
     {HMODULE pe[2048];DWORD need=0;if(EnumProcessModules(GetCurrentProcess(),(HMODULE*)pe,sizeof(pe),&need)){DWORD n=need/sizeof(HMODULE);for(DWORD i=0;i<n&&i<512;i++){char nme[MAX_PATH]={0};if(GetModuleFileNameA(pe[i],nme,MAX_PATH)){const char*b=strrchr(nme,'\\');b=b?b+1:nme;if(strstr(b,"ScriptHook")||!_stricmp(b,"dinput8.dll")||!_stricmp(b,"ScriptHookV.dll"))logf("  module[%u]: %s @ %p",i,nme,(void*)pe[i]);}}}}for(int i=0;i<120&&g_running;i++){if(shv::load()){logf("ScriptHookV exports resolved OK");shv::registerScript(shvScriptMain);logf("scriptRegister called (fn=%p)",(void*)shvScriptMain);return;}if(i==0)logf("SHV not found initially (err=%u). Will retry.",(unsigned)GetLastError());Sleep(500);}logf("ScriptHookV not loadable after 60s.");
 }
