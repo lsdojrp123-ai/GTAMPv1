@@ -1,0 +1,17 @@
+<%- include('partials/head') %>
+<div class="wrap" style="padding:44px 24px;max-width:820px">
+  <a href="/marketplace" class="muted">← Marketplace</a>
+  <div class="card mt">
+    <h1 style="font-size:26px;color:#fff"><%= asset.title %></h1>
+    <div class="muted mt">by <%= author ? author.username : 'Unknown' %></div>
+    <div class="mt"><%= asset.desc %></div>
+    <div style="display:flex;gap:10px;margin-top:22px;align-items:center">
+      <span class="<%= asset.price>0?'price':'price free' %>" style="font-size:22px"><%= asset.price>0?'$'+asset.price:'FREE' %></span>
+      <span class="tag"><%= asset.cat %></span>
+    </div>
+    <div style="margin-top:18px">
+      <% if (user) { %><a href="/keymaster" class="btn btn-accent">ADD TO KEYMASTER</a><% } else { %><a href="/login" class="btn btn-ghost">Login to add</a><% } %>
+    </div>
+  </div>
+</div>
+<%- include('partials/foot') %>

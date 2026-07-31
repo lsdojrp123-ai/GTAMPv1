@@ -1,0 +1,25 @@
+<%- include('partials/head') %>
+<div class="wrap" style="padding:44px 24px;max-width:900px">
+  <a href="/forum" class="muted">← Forums</a>
+  <div class="post mt">
+    <div class="title" style="font-size:20px"><%= post.title %></div>
+    <div class="meta">Thread #<%= post.id %> · <%= new Date(post.at).toLocaleString() %></div>
+    <div class="mt"><%= post.body %></div>
+  </div>
+  <% if (user) { %>
+    <div class="card mt">
+      <h3>Reply</h3>
+      <form method="POST" action="/forum/thread/<%= post.id %>/reply">
+        <div class="form-row"><textarea name="body" placeholder="Your reply..."></textarea></div>
+        <button class="btn btn-accent">REPLY</button>
+      </form>
+    </div>
+  <% } %>
+  <div class="mt">
+    <% replies.forEach(function(r){ %>
+      <div class="post"><div class="meta">by <%= r.uid %> · <%= new Date(r.at).toLocaleString() %></div>
+        <div class="mt"><%= r.body %></div></div>
+    <% }) %>
+  </div>
+</div>
+<%- include('partials/foot') %>

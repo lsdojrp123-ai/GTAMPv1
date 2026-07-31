@@ -1,0 +1,24 @@
+<%- include('partials/head') %>
+<div class="wrap" style="padding:44px 24px;max-width:900px">
+  <a href="/forum" class="muted">← All categories</a>
+  <h1 class="section-title"><%= cat.name %></h1>
+  <p class="section-sub"><%= cat.desc %></p>
+  <% if (user) { %>
+    <div class="card mt">
+      <h3>New thread</h3>
+      <form method="POST" action="/forum/<%= cat.id %>/new">
+        <div class="form-row"><input type="text" name="title" placeholder="Title" required></div>
+        <div class="form-row"><textarea name="body" placeholder="What's on your mind?"></textarea></div>
+        <button class="btn btn-accent">POST</button>
+      </form>
+    </div>
+  <% } else { %><p class="muted">Login to start a thread.</p><% } %>
+  <div class="mt">
+    <% if (!posts.length) { %><div class="muted">No threads yet.</div><% } %>
+    <% posts.forEach(function(p){ %>
+      <div class="post"><a href="/forum/thread/<%= p.id %>" class="title"><%= p.title %></a>
+        <div class="meta">by <%= p.uid %> · <%= new Date(p.at).toLocaleString() %></div></div>
+    <% }) %>
+  </div>
+</div>
+<%- include('partials/foot') %>

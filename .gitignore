@@ -19,3 +19,7 @@ UPDATE-HOOK-ONLY*/
 EXE-PARTS/
 *.exe.OLD
 GTAMP-Launcher-v*/
+
+# Website runtime data (created on first run)
+website/data/
+website/package-lock.json

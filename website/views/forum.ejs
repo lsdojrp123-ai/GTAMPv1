@@ -1,0 +1,12 @@
+<%- include('partials/head') %>
+<div class="wrap" style="padding:44px 24px">
+  <h1 class="section-title">Forums</h1>
+  <p class="section-sub">Join the discussion.</p>
+  <div class="grid g3">
+    <% cats.forEach(function(c){ 
+      var n = posts.filter(p=>p.cat===c.id).length; %>
+      <div class="card"><h3><a href="/forum/<%= c.id %>"><%= c.name %></a></h3><p><%= c.desc %></p><div class="muted mt"><%= n %> thread<%= n===1?'':'s' %></div></div>
+    <% }) %>
+  </div>
+</div>
+<%- include('partials/foot') %>

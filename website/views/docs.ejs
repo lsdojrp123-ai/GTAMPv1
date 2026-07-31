@@ -1,0 +1,15 @@
+<%- include('partials/head') %>
+<div class="wrap" style="padding:44px 24px;max-width:900px">
+  <h1 class="section-title">Documentation</h1>
+  <p class="section-sub">How to run servers, script, and add resources.</p>
+  <% var cats = {}; docs.forEach(d=>{ cats[d.cat]=cats[d.cat]||[]; cats[d.cat].push(d); }); %>
+  <% Object.keys(cats).forEach(function(c){ %>
+    <div class="card mt">
+      <h3><%= c %></h3>
+      <div class="mt" style="display:flex;flex-direction:column;gap:8px">
+        <% cats[c].forEach(function(d){ %><a href="/docs/<%= d.id %>"><%= d.title %></a><% }) %>
+      </div>
+    </div>
+  <% }) %>
+</div>
+<%- include('partials/foot') %>

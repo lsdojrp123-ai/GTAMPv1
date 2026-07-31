@@ -1,0 +1,11 @@
+<%- include('partials/head') %>
+<div class="wrap" style="padding:44px 24px">
+  <h1 class="section-title">Servers</h1>
+  <p class="section-sub">Live, synced from the GTAMP launcher. Click a server to connect.</p>
+  <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px">
+    <input type="text" id="srv-search" placeholder="Search by name, mode, or tag..." style="max-width:340px">
+    <select id="srv-tag" style="max-width:200px"><option value="">All tags</option></select>
+  </div>
+  <div id="server-list"><div class="muted">Loading servers...</div></div>
+</div>
+<%- include('partials/foot') %>

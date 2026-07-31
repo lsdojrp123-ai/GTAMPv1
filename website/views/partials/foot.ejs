@@ -1,0 +1,27 @@
+<footer>
+  <div class="wrap">
+    <div class="cols">
+      <div style="flex:2">
+        <div class="brand" style="margin-bottom:10px"><span class="mark">G</span>GTAMP</div>
+        <p class="muted" style="max-width:320px">FiveM-style GTA V multiplayer launcher. Run your own servers, browse the community, and script your own world.</p>
+      </div>
+      <div>
+        <h4>Product</h4>
+        <a href="/">Home</a><a href="/servers">Servers</a><a href="/download/GTAMP-Launcher-v1.6.0.exe">Download</a><a href="/run-server">Run your own server</a>
+      </div>
+      <div>
+        <h4>Community</h4>
+        <a href="/forum">Forums</a><a href="/marketplace">Marketplace</a><a href="/docs">Docs</a><a href="/support">Support</a>
+      </div>
+      <div>
+        <h4>Account</h4>
+        <% if (user) { %><a href="/keymaster">Keymaster</a><a href="/logout">Logout</a>
+        <% } else { %><a href="/login">Login</a><a href="/register">Register</a><% } %>
+      </div>
+    </div>
+    <div class="muted">© <%= new Date().getFullYear() %> GTAMP. Not affiliated with Rockstar Games or Cfx.re.</div>
+  </div>
+</footer>
+<script src="/js/main.js"></script>
+</body>
+</html>

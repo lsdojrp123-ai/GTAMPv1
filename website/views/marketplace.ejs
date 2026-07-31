@@ -1,0 +1,23 @@
+<%- include('partials/head') %>
+<div class="wrap" style="padding:44px 24px">
+  <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:14px">
+    <div><h1 class="section-title" style="margin:0">Marketplace</h1>
+    <p class="section-sub" style="margin:6px 0 0">Buy and sell GTAMP assets.</p></div>
+    <% if (user) { %><a href="/keymaster" class="btn btn-accent">PUBLISH AN ASSET</a><% } %>
+  </div>
+  <div class="grid g3 mt" style="margin-top:26px">
+    <% if (!assets.length) { %><div class="muted">No assets published yet.</div><% } %>
+    <% assets.forEach(function(a){ %>
+      <div class="asset">
+        <h3 style="font-size:17px"><a href="/marketplace/<%= a.id %>"><%= a.title %></a></h3>
+        <p class="muted" style="flex:1"><%= a.desc %></p>
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <span class="<%= a.price>0?'price':'price free' %>"><%= a.price>0 ? '$'+a.price : 'FREE' %></span>
+          <span class="tag"><%= a.cat %></span>
+        </div>
+        <div class="muted" style="font-size:12px"><%= a.downloads||0 %> downloads</div>
+      </div>
+    <% }) %>
+  </div>
+</div>
+<%- include('partials/foot') %>
