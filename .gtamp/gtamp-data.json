@@ -1,0 +1,75 @@
+{
+  "users": {
+    "test": {
+      "id": 1,
+      "name": "test",
+      "license": "test",
+      "money": 5000,
+      "bank": 25000,
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 72
+      },
+      "model": "mp_m_freemode_01",
+      "appearance": {},
+      "inventory": {},
+      "vehicles": [],
+      "created": 1785346894088
+    },
+    "TestUser": {
+      "id": 2,
+      "name": "TestUser",
+      "license": "TestUser",
+      "money": 5000,
+      "bank": 25000,
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 72
+      },
+      "model": "mp_m_freemode_01",
+      "appearance": {},
+      "inventory": {},
+      "vehicles": [],
+      "created": 1785445074728
+    },
+    "Alice": {
+      "id": 3,
+      "name": "Alice",
+      "license": "Alice",
+      "money": 5000,
+      "bank": 25000,
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 72
+      },
+      "model": "mp_m_freemode_01",
+      "appearance": {},
+      "inventory": {},
+      "vehicles": [],
+      "created": 1785448346572,
+      "last_seen": 1785448346573
+    },
+    "Bob": {
+      "id": 4,
+      "name": "Bob",
+      "license": "Bob",
+      "money": 5000,
+      "bank": 25000,
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 72
+      },
+      "model": "mp_m_freemode_01",
+      "appearance": {},
+      "inventory": {},
+      "vehicles": [],
+      "created": 1785448347372
+    }
+  },
+  "vehicles": {},
+  "houses": {}
+}

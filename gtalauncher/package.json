@@ -1,0 +1,71 @@
+{
+  "name": "gtamp-launcher",
+  "version": "1.0.0",
+  "description": "GTAMP - GTA Multiplayer Launcher (FiveM-style)",
+  "main": "src/main/main.js",
+  "author": "GTAMP",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --win portable --x64",
+    "server": "node src/fxserver/index.js"
+  },
+  "build": {
+    "appId": "com.gtamp.launcher",
+    "productName": "GTAMP Launcher",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/main/**/*",
+      "src/preload/**/*",
+      "src/renderer/**/*",
+      "src/fxserver/**/*",
+      "src/client/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "dist-bin",
+        "to": "native",
+        "filter": [
+          "*.exe",
+          "*.dll"
+        ]
+      }
+    ],
+    "asar": true,
+    "compression": "maximum",
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "sign": null,
+      "signingHashAlgorithms": [],
+      "verifyUpdateCodeSignature": false,
+      "forceCodeSigning": false,
+      "signAndEditExecutable": false
+    },
+    "portable": {
+      "artifactName": "GTAMP-Launcher-Portable-${version}-x64.exe",
+      "requestExecutionLevel": "user",
+      "unpackDirName": "GTAMP-v152-HOTFIX"
+    }
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "dependencies": {
+    "ws": "^8.21.1"
+  }
+}

@@ -1,0 +1,6 @@
+EXPORTS
+DllMain PRIVATE
+stream_init
+stream_download
+stream_mount
+gtamp_create_example_resource

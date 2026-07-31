@@ -1,0 +1,19 @@
+{
+  "users": {
+    "Tester": {
+      "id": 1,
+      "name": "Tester",
+      "license": "Tester",
+      "money": 5000,
+      "bank": 10000,
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 72
+      },
+      "created": 1785306898901
+    }
+  },
+  "vehicles": {},
+  "houses": {}
+}

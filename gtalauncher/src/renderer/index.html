@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:*;">
+<title>GTAMP - GTA Multiplayer</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body class="fivem-app">
+
+<div class="drag-region"></div>
+
+<div class="win-controls">
+  <button class="wc-btn" id="tb-min" title="Minimize">&#8211;</button>
+  <button class="wc-btn" id="tb-max" title="Maximize">&#9633;</button>
+  <button class="wc-btn close" id="tb-close" title="Close">&#10005;</button>
+</div>
+
+<!-- ============== HOME ============== -->
+<div class="home-screen" id="home-screen">
+
+  <div class="home-ver">GTAMP v1.5.2 - Phase 5 - remote player sync (SHV fiber fix)</div>
+
+  <div class="home-notice">
+    <strong>Heads up:</strong> This is a working FiveM-style launcher shell and FXServer framework.
+    Buttons &harr; host/browse/connect/F8/settings all work and launch GTA V into <em>offline story mode</em>.
+    Full in-GTA player sync, DX11 overlay, native invoker, and R* netcode replacement are
+    <strong>not</strong> included (those take years of C++ reverse engineering).
+  </div>
+
+  <div class="home-hero">
+    <div class="fivem-shape big">
+      <div class="fivem-bars"><span></span><span></span><span></span><span></span><span></span></div>
+    </div>
+    <div class="home-title">GTAMP MULTIPLAYER</div>
+    <div class="home-sub">FiveM-style GTA V multiplayer launcher &mdash; browse servers, host your own, or direct-connect.</div>
+  </div>
+
+  <!-- THREE BIG PRIMARY ACTIONS. Always visible, always in order. -->
+  <div class="home-actions">
+    <button class="home-btn primary big" id="home-play">
+      <span class="hb-ico">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+      </span>
+      <span class="hb-text">
+        <span class="hb-label">BROWSE SERVERS</span>
+        <span class="hb-sub">Find and join community servers</span>
+      </span>
+    </button>
+
+    <button class="home-btn host big" id="home-host">
+      <span class="hb-ico">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="4" width="18" height="7" rx="1"/><rect x="3" y="13" width="18" height="7" rx="1"/><circle cx="7" cy="7.5" r="1" fill="currentColor"/><circle cx="7" cy="16.5" r="1" fill="currentColor"/><path d="M11 7.5h6M11 16.5h6"/></svg>
+      </span>
+      <span class="hb-text">
+        <span class="hb-label">HOST A SERVER</span>
+        <span class="hb-sub">Start your own FXServer for friends</span>
+      </span>
+    </button>
+
+    <button class="home-btn ghost big" id="home-direct">
+      <span class="hb-ico">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+      </span>
+      <span class="hb-text">
+        <span class="hb-label">DIRECT CONNECT</span>
+        <span class="hb-sub">Join via IP:port</span>
+      </span>
+    </button>
+  </div>
+
+  <!-- Phase 4: remote-spawn test panel -->
+  <div class="spawn-panel" id="spawn-panel" style="display:none;">
+    <div class="sp-pill" id="sp-pill"><span class="sp-dot" id="sp-dot"></span><span class="sp-txt" id="sp-txt">Hook: connecting...</span></div>
+    <button class="btn btn-orange" id="btn-spawn-cop">Spawn Cop in-game</button>
+    <span class="sp-sub">Sends spawnPed over TCP → SHV. Or press F11 in-game.</span>
+  </div>
+
+  <!-- Quick-connect row -->
+  <div class="home-quick">
+    <div class="hq-row">
+      <span class="hq-label">Quick join:</span>
+      <input id="home-direct-input" class="hq-input" placeholder="127.0.0.1:22005" value="127.0.0.1:22005">
+      <button class="btn btn-orange btn-sm" id="home-direct-go">CONNECT</button>
+      <button class="btn btn-ghost btn-sm" id="hc-host-btn">HOST SERVER</button>
+      <button class="btn btn-ghost btn-sm" id="home-settings-btn">SETTINGS</button>
+    </div>
+  </div>
+
+  <div class="home-cards">
+    <div class="hc" id="hc-local">
+      <div class="hc-banner local">
+        <div class="hc-state"><span class="hc-dot"></span>LOCAL SERVER</div>
+        <div class="hc-pc">1/64</div>
+      </div>
+      <div class="hc-body">
+        <div class="hc-title">GTAMP Official (Local)</div>
+        <div class="hc-desc">Bundled freeroam server that starts automatically.</div>
+        <button class="btn btn-orange btn-sm hc-connect" data-addr="127.0.0.1:22005">CONNECT</button>
+      </div>
+    </div>
+
+    <div class="hc">
+      <div class="hc-banner direct">
+        <div class="hc-state"><span class="hc-dot"></span>DIRECT</div>
+      </div>
+      <div class="hc-body">
+        <div class="hc-title">Direct Connect</div>
+        <div class="hc-desc">Enter any host:port in the box above to join.</div>
+      </div>
+    </div>
+
+    <div class="hc hc-host">
+      <div class="hc-banner host">
+        <div class="hc-state"><span class="hc-dot warn"></span>HOST</div>
+      </div>
+      <div class="hc-body">
+        <div class="hc-title">Host a Server</div>
+        <div class="hc-desc">Run FXServer locally, invite LAN friends.</div>
+        <button class="btn btn-ghost btn-sm" id="hc-host-btn2">&#9654; START HOSTING</button>
+      </div>
+    </div>
+
+    <div class="hc" id="hc-lan">
+      <div class="hc-banner lan">
+        <div class="hc-state"><span class="hc-dot warn"></span>LAN</div>
+        <div class="hc-pc" id="lan-count">0 servers</div>
+      </div>
+      <div class="hc-body">
+        <div class="hc-title">LAN Servers</div>
+        <div class="hc-desc" id="lan-desc">Servers on your home network.</div>
+        <button class="btn btn-ghost btn-sm" id="lan-scan">SCAN</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="home-footer">
+    <span class="hf-nick" id="nick-pill">Player</span>
+    <span class="hf-hint">Press <kbd>F8</kbd> console &middot; v1.0.3</span>
+  </div>
+</div>
+
+<!-- ============== LAUNCHER PANEL ============== -->
+<div class="launcher" id="launcher">
+
+  <div class="topbar">
+    <div class="tb-left">
+      <button class="icon-btn" id="btn-home" title="Home">&#8962;</button>
+      <button class="icon-btn active" id="btn-servers" title="Servers">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M3 3h8v8H3zm10 0h8v8h-8zM3 13h8v8H3zm10 0h8v8h-8z"/></svg>
+      </button>
+      <button class="icon-btn" id="btn-favs" title="Favorites">&#9733;</button>
+      <button class="icon-btn" id="btn-history" title="History">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg>
+      </button>
+      <button class="icon-btn host-btn" id="btn-host" title="Host Server &#8212; start your own server">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="7" rx="1"/><rect x="3" y="13" width="18" height="7" rx="1"/><circle cx="7" cy="7.5" r="0.8" fill="currentColor"/><circle cx="7" cy="16.5" r="0.8" fill="currentColor"/><path d="M11 7.5h6M11 16.5h6"/></svg>
+        <span class="ib-label">HOST</span>
+      </button>
+      <button class="icon-btn" id="btn-refresh" title="Refresh">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>
+      </button>
+    </div>
+    <div class="tb-center">
+      <div class="search-wrap">
+        <svg class="search-ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>
+        <input id="server-search" class="search-input" placeholder="Search or enter an IP address...">
+      </div>
+    </div>
+    <div class="tb-right">
+      <div class="filter-wrap">
+        <button class="icon-btn" id="btn-filter" title="Filter">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M3 5h18l-7 9v6l-4-2v-4z"/></svg>
+        </button>
+        <div class="dropdown" id="filter-dropdown">
+          <div class="dd-title">Show</div>
+          <label class="dd-opt"><input type="checkbox" id="f-empty"><span>Hide empty</span></label>
+          <label class="dd-opt"><input type="checkbox" id="f-full"><span>Hide full</span></label>
+          <label class="dd-opt"><input type="checkbox" id="f-lan"><span>LAN only</span></label>
+          <div class="dd-title">Max ping</div>
+          <select id="f-ping" class="dd-select">
+            <option value="9999">Any</option><option value="50">&lt;50ms</option>
+            <option value="100">&lt;100ms</option><option value="200">&lt;200ms</option>
+          </select>
+        </div>
+      </div>
+      <div class="filter-wrap">
+        <button class="icon-btn" id="btn-sort" title="Sort">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M6 12h12M10 18h4"/></svg>
+        </button>
+        <div class="dropdown" id="sort-dropdown">
+          <div class="dd-item active" data-sort="players">Players (most)</div>
+          <div class="dd-item" data-sort="ping">Ping (lowest)</div>
+          <div class="dd-item" data-sort="name">Name (A-Z)</div>
+        </div>
+      </div>
+      <button class="icon-btn" id="btn-add" title="Add Server (Direct Connect)">+</button>
+      <button class="icon-btn" id="btn-settings" title="Settings">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <div class="body" id="body">
+
+    <!-- SERVERS VIEW -->
+    <div class="view-col active" id="view-servers">
+      <div class="server-list-col full">
+        <div class="list-header">
+          <div class="col-ping"></div>
+          <div class="col-flag"></div>
+          <div class="col-name">Server</div>
+          <div class="col-tags">Tags</div>
+          <div class="col-players">Players</div>
+        </div>
+        <div class="server-list" id="server-list"></div>
+      </div>
+      <div class="featured-col" id="featured-col">
+        <button id="feat-host-big" class="feat-host-big" title="Host your own server">
+          <span class="fhb-ico">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="7" rx="1"/><rect x="3" y="13" width="18" height="7" rx="1"/><circle cx="7" cy="7.5" r="0.8" fill="currentColor"/><circle cx="7" cy="16.5" r="0.8" fill="currentColor"/><path d="M11 7.5h6M11 16.5h6"/></svg>
+          </span>
+          <span class="fhb-text">
+            <span class="fhb-title">HOST A SERVER</span>
+            <span class="fhb-sub">Start your own FXServer now</span>
+          </span>
+          <span class="fhb-arrow">&#9654;</span>
+        </button>
+        <div class="feat-sec-title">QUICK CONNECT</div>
+        <div id="feat-quick"></div>
+        <div class="feat-sec-title" style="margin-top:16px;">YOUR HOSTED SERVERS</div>
+        <div id="feat-hosted"><div class="feat-empty">No hosted servers running. Click HOST A SERVER above to start one.</div></div>
+      </div>
+    </div>
+
+    <!-- DIRECT CONNECT VIEW -->
+    <div class="view-col" id="view-direct">
+      <div class="pane-wide">
+        <h2 class="pane-title">Direct Connect</h2>
+        <p class="pane-sub">Connect directly to a server by IP address and port.</p>
+        <div class="form-row">
+          <label>Server address</label>
+          <input id="direct-addr" class="text-input big" placeholder="127.0.0.1:22005" value="127.0.0.1:22005">
+        </div>
+        <div class="form-row">
+          <label>Password (if required)</label>
+          <input id="direct-pw" class="text-input" type="password" placeholder="Leave blank for public servers">
+        </div>
+        <div class="form-row">
+          <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+            <input type="checkbox" id="direct-save" checked> Save to favorites
+          </label>
+        </div>
+        <div class="form-row btn-row">
+          <button id="direct-connect" class="btn btn-orange">CONNECT</button>
+          <button id="direct-ping" class="btn btn-ghost">PING</button>
+        </div>
+        <div class="direct-status" id="direct-status"></div>
+        <h3 class="pane-subtitle" style="margin-top:28px;">Saved addresses</h3>
+        <div class="history-list" id="saved-list"></div>
+      </div>
+    </div>
+
+    <!-- HISTORY VIEW -->
+    <div class="view-col" id="view-history">
+      <div class="pane-wide">
+        <h2 class="pane-title">History</h2>
+        <p class="pane-sub">Servers you have recently joined.</p>
+        <div class="history-list" id="history-list"></div>
+      </div>
+    </div>
+
+    <!-- FAVORITES VIEW -->
+    <div class="view-col" id="view-favorites">
+      <div class="pane-wide">
+        <h2 class="pane-title">Favorites</h2>
+        <p class="pane-sub">Servers you've bookmarked.</p>
+        <div class="history-list" id="favorites-list"></div>
+      </div>
+    </div>
+
+    <!-- HOST SERVER VIEW -->
+    <div class="view-col" id="view-host">
+      <div class="pane-wide">
+        <h2 class="pane-title">Host a Server</h2>
+        <p class="pane-sub">Start a local FXServer that you and LAN friends can join.</p>
+
+        <div class="host-grid">
+          <div class="form-row">
+            <label>Server name</label>
+            <input id="host-name" class="text-input" value="My GTAMP Server">
+          </div>
+          <div class="form-row two-col">
+            <div>
+              <label>Port</label>
+              <input id="host-port" class="text-input" type="number" value="22005" min="1024" max="65535">
+            </div>
+            <div>
+              <label>Max players</label>
+              <input id="host-max" class="text-input" type="number" value="32" min="1" max="1024">
+            </div>
+          </div>
+          <div class="form-row">
+            <label>Gamemode</label>
+            <select id="host-gamemode" class="text-input">
+              <option value="freeroam">Freeroam</option>
+              <option value="roleplay">Roleplay</option>
+              <option value="drift">Drift / Racing</option>
+              <option value="deathmatch">Deathmatch</option>
+              <option value="sandbox">Sandbox</option>
+            </select>
+          </div>
+          <div class="form-row">
+            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+              <input type="checkbox" id="host-lan" checked> Advertise on LAN
+            </label>
+          </div>
+          <div class="form-row">
+            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+              <input type="checkbox" id="host-public"> Public internet (port-forward required)
+            </label>
+          </div>
+          <div class="form-row">
+            <label>Server description</label>
+            <input id="host-desc" class="text-input" placeholder="My awesome GTAMP server" value="Welcome to my server!">
+          </div>
+          <div class="form-row btn-row">
+            <button id="host-start" class="btn btn-orange">START SERVER</button>
+            <button id="host-stop" class="btn btn-ghost" disabled>STOP SERVER</button>
+          </div>
+        </div>
+
+        <div class="host-status" id="host-status"></div>
+
+        <h3 class="pane-subtitle" style="margin-top:28px;">Running servers</h3>
+        <div class="host-running" id="host-running"><div class="feat-empty">No servers running.</div></div>
+
+        <h3 class="pane-subtitle" style="margin-top:24px;">Loaded resources</h3>
+        <div class="res-list">
+          <div class="res-row"><span class="res-name">chat</span><span class="res-tag">running</span></div>
+          <div class="res-row"><span class="res-name">freeroam</span><span class="res-tag">running</span></div>
+          <div class="res-row"><span class="res-name">spawnmanager</span><span class="res-tag">running</span></div>
+          <div class="res-row"><span class="res-name">voice</span><span class="res-tag">running</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SETTINGS VIEW -->
+    <div class="view-col" id="view-settings">
+      <div class="pane-wide">
+        <h2 class="pane-title">Settings</h2>
+
+        <h3 class="pane-subtitle">Game</h3>
+        <div class="form-row">
+          <label>GTA V install path</label>
+          <div style="display:flex;gap:8px;">
+            <input id="settings-path" class="text-input" style="flex:1;" placeholder="C:\Program Files\Rockstar Games\Grand Theft Auto V">
+            <button id="settings-browse" class="btn btn-ghost">BROWSE</button>
+            <button id="settings-autodetect" class="btn btn-ghost">AUTO-DETECT</button>
+          </div>
+        </div>
+        <div class="form-row">
+          <label>Launcher type</label>
+          <select id="settings-launcher" class="text-input">
+            <option value="auto">Automatic</option>
+            <option value="steam">Steam</option>
+            <option value="epic">Epic Games</option>
+            <option value="rockstar">Rockstar Launcher</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>Nickname</label>
+          <input id="settings-nick" class="text-input" placeholder="Player">
+        </div>
+
+        <h3 class="pane-subtitle" style="margin-top:24px;">Graphics</h3>
+        <div class="form-row">
+          <label>Preset</label>
+          <select id="settings-gfx" class="text-input">
+            <option>Low</option><option>Medium</option><option selected>High</option><option>Ultra</option><option>Custom</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+            <input type="checkbox" id="settings-windowed"> Windowed mode
+          </label>
+        </div>
+
+        <h3 class="pane-subtitle" style="margin-top:24px;">Audio</h3>
+        <div class="form-row"><label>Master volume</label><input id="vol-master" type="range" min="0" max="100" value="80"><span id="vol-label">80</span></div>
+        <div class="form-row"><label>Music</label><input id="vol-music" type="range" min="0" max="100" value="50"></div>
+        <div class="form-row"><label>SFX</label><input id="vol-sfx" type="range" min="0" max="100" value="80"></div>
+        <div class="form-row"><label>Voice</label><input id="vol-voice" type="range" min="0" max="100" value="80"></div>
+        <div class="form-row">
+          <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+            <input type="checkbox" id="settings-voice" checked> Enable voice chat
+          </label>
+        </div>
+
+        <h3 class="pane-subtitle" style="margin-top:24px;">Misc</h3>
+        <div class="form-row">
+          <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+            <input type="checkbox" id="settings-autoconnect"> Auto-connect to last server on launch
+          </label>
+        </div>
+
+        <div class="form-row btn-row" style="margin-top:20px;">
+          <button id="settings-save" class="btn btn-orange">SAVE</button>
+          <button id="settings-reset" class="btn btn-ghost">RESET TO DEFAULTS</button>
+          <button id="settings-clearcache" class="btn btn-ghost">CLEAR CACHE</button>
+          <button id="settings-opendata" class="btn btn-ghost">OPEN DATA FOLDER</button>
+        </div>
+
+        <div class="direct-status" id="settings-status"></div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="bottom-bar">
+    <div class="bb-left">
+      <span class="bb-pill" id="bb-nick">Player</span>
+      <span class="bb-pill" id="bb-platform">Platform: Auto</span>
+    </div>
+    <div class="bb-center">
+      <span id="bb-status">Idle</span>
+    </div>
+    <div class="bb-right">
+      <span class="bb-pill" id="bb-server">No server selected</span>
+      <span class="bb-pill" id="bb-ping">--ms</span>
+      <button class="bb-connect btn btn-orange btn-sm" id="bb-connect" disabled>CONNECT</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============== F8 CONSOLE ============== -->
+<div class="f8-console" id="f8-console">
+  <div class="f8-bar">
+    <span class="f8-title">F8 Console &#8212; GTAMP Client v1.5.2</span>
+    <span class="f8-hint">Press F8 or ESC to close &middot; Arrow Up/Down for history</span>
+  </div>
+  <div class="f8-output" id="f8-output"></div>
+  <div class="f8-input-line">
+    <span class="f8-prompt">&gt;</span>
+    <input id="f8-input" class="f8-input" autocomplete="off" spellcheck="false" placeholder="Type a command (help for list)...">
+  </div>
+</div>
+
+<!-- ============== CONNECTING SCREEN ============== -->
+<div class="connecting" id="connecting">
+  <div class="conn-top">
+    <div class="conn-loader"></div>
+    <div class="conn-stage" id="conn-stage">Connecting...</div>
+    <div class="conn-sub" id="conn-sub"></div>
+  </div>
+  <div class="conn-resources" id="conn-resources"></div>
+  <div class="conn-cancel">
+    <button class="btn btn-ghost btn-sm" id="conn-cancel-btn">CANCEL</button>
+  </div>
+</div>
+
+<!-- Context menu -->
+<div class="ctx-menu" id="ctx-menu"></div>
+
+<!-- Toast container -->
+<div class="toasts" id="toasts"></div>
+
+<script src="js/app.js"></script>
+</body>
+</html>
