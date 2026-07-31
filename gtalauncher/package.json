@@ -1,6 +1,6 @@
 {
   "name": "gtamp-launcher",
-  "version": "1.5.2",
+  "version": "1.6.0",
   "description": "GTAMP - GTA Multiplayer Launcher (FiveM-style)",
   "main": "src/main/main.js",
   "author": "GTAMP",
@@ -66,7 +66,7 @@
     "portable": {
       "artifactName": "GTAMP-Launcher-v${version}.exe",
       "requestExecutionLevel": "user",
-      "unpackDirName": "GTAMP-v152-HOTFIX"
+      "unpackDirName": "GTAMP-v160-0ea2edd"
     },
     "asarUnpack": [
       "**/client/client-bridge.js",
