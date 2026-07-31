@@ -129,6 +129,38 @@ function resyncAllRemotePeds(reason) {
 }
 
 
+// ---- Solo TestBot (bridge-local) — works even if server freeroam bot fails ----
+let localBotTimer = null;
+function startLocalTestBot() {
+  if (localBotTimer) return;
+  const id = 'p9001';
+  const name = 'TestBot';
+  const model = 'mp_m_freemode_01';
+  let ang = 0;
+  // Seed roster so resync keeps it
+  const seed = {
+    netId: 9001, name, model,
+    pos: { x: state.me.x + 4, y: state.me.y, z: state.me.z },
+    h: 0, health: 200
+  };
+  state.players.set(9001, seed);
+  hookSpawnRemote(seed);
+  console.log('[Client] Local TestBot started near player for solo Phase 6 test');
+  localBotTimer = setInterval(() => {
+    ang += 0.05;
+    const baseX = state.me.x || 0, baseY = state.me.y || 0, baseZ = state.me.z || 72;
+    const x = baseX + Math.cos(ang) * 5;
+    const y = baseY + Math.sin(ang) * 5;
+    let h = ang * 180 / Math.PI + 90;
+    h = ((h % 360) + 360) % 360;
+    const p = state.players.get(9001) || seed;
+    p.pos = { x, y, z: baseZ }; p.h = h; p.model = model; p.name = name;
+    state.players.set(9001, p);
+    hookMoveRemote(p);
+  }, 66);
+}
+
+
 // ---- Resources (stages 6+7+8) ----
 const resourceVMs = new Map();
 
@@ -289,6 +321,14 @@ udp.on('listening', () => {
   // STAGE 5: connect
   sendUDP({ t: 'join', nick });
   state.connected = true;
+  // If server never answers, still allow solo hook features
+  setTimeout(() => {
+    if (!state.netId) {
+      console.log('[Client] no welcome from server yet — solo mode (local TestBot on hook ready)');
+      state.netId = 1;
+      state.spawned = true;
+    }
+  }, 3000);
 
   // Keep-alive
   setInterval(() => sendUDP({ t: 'ping', ts: Date.now() }), 2000);
@@ -525,6 +565,8 @@ const tcpServer = net.createServer((socket) => {
   flushHookQueue();
   // Phase 6: hook may have been re-injected mid-session — recreate remote peds
   resyncAllRemotePeds('hook-connect');
+  // If SHV already ready (reconnect), ensure TestBot
+  try { if (state.me && (state.me.x || state.me.y)) startLocalTestBot(); } catch {}
   socket.setEncoding('utf8');
   let buf = '';
   socket.on('data', (d) => {
@@ -541,7 +583,19 @@ const tcpServer = net.createServer((socket) => {
       } else if (m.t === 'netPedSpawned') {
         console.log('[Client] remote ped', m.id, '-> GTA ped', m.ped);
       } else if (m.t === 'chat') {
-        sendUDP({ t: 'chat', msg: m.msg });
+        const raw = (m.msg || '').toString().trim();
+        const asCmd = raw.startsWith('/') ? raw.slice(1) : raw;
+        const parts = asCmd.split(/\s+/).filter(Boolean);
+        const cmd = (parts[0] || '').toLowerCase();
+        // Known local commands work with or without leading /
+        if (cmd && cmdHandlers[cmd]) {
+          try { cmdHandlers[cmd](0, parts.slice(1)); } catch (e) { console.error('[Client] cmd', cmd, e.message); }
+          console.log('[Client] ran local cmd:', cmd);
+        } else if (raw.startsWith('/')) {
+          sendUDP({ t: 'chat', msg: raw }); // server commands
+        } else {
+          sendUDP({ t: 'chat', msg: raw });
+        }
       } else if (m.t === 'cmd') {
         const cmd = (m.cmd||'').toLowerCase();
         if (cmdHandlers[cmd]) { try { cmdHandlers[cmd](0, m.args||[]); } catch {} }
@@ -551,6 +605,8 @@ const tcpServer = net.createServer((socket) => {
       } else if (m.t === 'ready') {
         // Phase 6: SHV fiber is live — ensure remote peds exist in-world
         resyncAllRemotePeds('hook-ready');
+        // Solo playtest: always show a remote ped near the player
+        try { startLocalTestBot(); } catch (e) { console.error('[Client] local TestBot failed', e.message); }
         broadcastWS({ t:'hookReady', ...m }); broadcastCtrl(m);
       } else if (m.t === 'spawn') {
         if (m.ped && m.ok) state.entities.set(m.ped, { id:m.ped, type:'ped', model:m.model, pos:{x:m.x,y:m.y,z:m.z,h:m.h||0} });
