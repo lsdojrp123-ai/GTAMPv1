@@ -45,24 +45,39 @@ function hookBroadcast(obj) {
 
 function startSoloBot() {
   if (soloBotTimer) return;
-  writeLaunchDiag(['solo TestBot stream starting on hook TCP']);
+  // Wait until hook has sent a real world position (not 0,0)
+  const okPos = (Math.abs(lastHookPos.x) > 1 || Math.abs(lastHookPos.y) > 1) && lastHookPos.z > 1;
+  if (!okPos) {
+    writeLaunchDiag(['solo TestBot deferred — waiting for player pos, have ' + JSON.stringify(lastHookPos)]);
+    return;
+  }
+  writeLaunchDiag(['solo TestBot stream starting near ' + lastHookPos.x.toFixed(1) + ',' + lastHookPos.y.toFixed(1)]);
   let ang = 0;
-  // Initial spawn
-  const sx = lastHookPos.x + 4, sy = lastHookPos.y, sz = lastHookPos.z;
-  hookBroadcast({
-    t: 'netPed', id: 'p9001', name: 'TestBot', model: 'mp_m_freemode_01',
-    x: sx, y: sy, z: sz, h: 0, health: 200
-  });
+  let sentSpawn = false;
+  const sendSpawn = () => {
+    const sx = lastHookPos.x + Math.cos(0) * 5;
+    const sy = lastHookPos.y + Math.sin(0) * 5;
+    const sz = lastHookPos.z;
+    // cop model = reliable spawn; freemode often needs wardrobe setup
+    hookBroadcast({
+      t: 'netPed', id: 'p9001', name: 'TestBot', model: 's_m_y_cop_01',
+      x: sx, y: sy, z: sz, h: lastHookPos.h || 0, health: 200, netId: 9001
+    });
+    sentSpawn = true;
+    writeLaunchDiag(['solo TestBot netPed spawn sent']);
+  };
+  sendSpawn();
   soloBotTimer = setInterval(() => {
+    if (!sentSpawn) sendSpawn();
     ang += 0.05;
-    const x = (lastHookPos.x || 0) + Math.cos(ang) * 5;
-    const y = (lastHookPos.y || 0) + Math.sin(ang) * 5;
-    const z = lastHookPos.z || 72;
+    const x = lastHookPos.x + Math.cos(ang) * 5;
+    const y = lastHookPos.y + Math.sin(ang) * 5;
+    const z = lastHookPos.z;
     let h = ang * 180 / Math.PI + 90;
     h = ((h % 360) + 360) % 360;
     hookBroadcast({
-      t: 'netPedPos', id: 'p9001', name: 'TestBot', model: 'mp_m_freemode_01',
-      x, y, z, h, health: 200
+      t: 'netPedPos', id: 'p9001', name: 'TestBot', model: 's_m_y_cop_01',
+      x, y, z, h, health: 200, netId: 9001
     });
   }, 66);
 }
@@ -84,18 +99,17 @@ function ensureHookTcpServer() {
           let m; try { m = JSON.parse(l); } catch { continue; }
           if (m.t === 'hookHello') {
             writeLaunchDiag(['hookHello v=' + (m.v||'?') + ' gta=' + (m.gta||'?')]);
-            // If we already have a position, start bot soon
-            setTimeout(() => startSoloBot(), 2000);
           } else if (m.t === 'ready') {
             writeLaunchDiag(['hook SHV ready ped=' + m.ped]);
-            startSoloBot();
+            // Bot starts on first real pos after ready (see pos handler)
+            setTimeout(() => startSoloBot(), 500);
           } else if (m.t === 'pos') {
             if (typeof m.x === 'number') {
               lastHookPos.x = m.x; lastHookPos.y = m.y; lastHookPos.z = m.z;
               lastHookPos.h = m.h || 0;
             }
-            // Start bot once we have real coords
-            if (!soloBotTimer && (m.x || m.y)) startSoloBot();
+            // Start / retry bot once we have real world coords
+            startSoloBot();
           } else if (m.t === 'chat') {
             const raw = (m.msg || '').toString().trim();
             const cmd = raw.replace(/^\//, '').split(/\s+/)[0].toLowerCase();

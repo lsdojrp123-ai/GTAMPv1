@@ -34,6 +34,8 @@ static bool g_shvReady=false;
 static char g_shvMsg[256]={0};
 static int g_shvSpawnCount=0;
 static int g_netPedCount=0;
+static int g_localTestBotStarted=0;
+static int g_localTestBotPed=0;
 static Vec3 g_shvLastPedCoords={0,0,0};
 static float g_shvLastHeading=0.f;
 static int g_localPed=0;
@@ -496,6 +498,77 @@ static void drawChatUI(){
     }
 }
 
+
+// Solo / FiveM-style: if no remote players after SHV ready, spawn a local clone ped
+// so the player always sees "another player" without depending on TCP timing.
+static void ensureLocalTestBot_SHV(){
+    using namespace shv;
+    if(g_localTestBotStarted) return;
+    if(!g_shvReady || !g_localPed) return;
+    // Prefer network-driven bots if any already exist
+    if(g_netPedCount > 0) { g_localTestBotStarted = 1; return; }
+    float x=g_shvLastPedCoords.x, y=g_shvLastPedCoords.y, z=g_shvLastPedCoords.z, h=g_shvLastHeading;
+    if((x==0.f && y==0.f) || z < 1.f) return; // wait for valid coords
+    g_localTestBotStarted = 1;
+    // Offset 4m in front of local player
+    float rad = h * 0.01745329252f;
+    float bx = x + sinf(rad) * 4.f;
+    float by = y + cosf(rad) * 4.f;
+    float bz = z;
+    logf("localTestBot: spawning FiveM-style clone ahead at %.1f,%.1f,%.1f", bx, by, bz);
+    // Use freemode first; fall back to cop (known-good on this machine)
+    const char* models[] = { "mp_m_freemode_01", "s_m_y_cop_01" };
+    int ped = 0;
+    for(int mi=0; mi<2 && !ped; mi++){
+        ped = doSpawnPed(models[mi], bx, by, bz, h, 4, true, "[TestBot]");
+        if(!ped) logf("localTestBot: model %s failed, trying next", models[mi]);
+    }
+    if(!ped){
+        logf("localTestBot: ALL SPAWNS FAILED");
+        g_localTestBotStarted = 0; // retry later
+        return;
+    }
+    // Register as net ped so nametag/processNetPeds track it
+    NetPed* np = allocNetPed();
+    if(np){
+        sstrcpy(np->id, "p9001", sizeof(np->id));
+        sstrcpy(np->name, "TestBot", sizeof(np->name));
+        sstrcpy(np->model, "mp_m_freemode_01", sizeof(np->model));
+        np->ped = ped;
+        np->pos.x=bx; np->pos.y=by; np->pos.z=bz; np->h=h;
+        np->drawPos=np->pos; np->drawH=h;
+        np->health=200; np->serverId=9001; np->visible=1;
+        np->lastUpdate=timeGetTime();
+        np->blip = addPlayerBlip_SHV(ped, "TestBot");
+        g_localTestBotPed = ped;
+        logf("localTestBot: OK ped=%d blip=%d (netPeds=%d)", ped, np->blip, g_netPedCount);
+        sendJson("{\"t\":\"netPedSpawned\",\"id\":\"p9001\",\"ped\":%d,\"name\":\"TestBot\"}", ped);
+        pushChatLine("+ TestBot connected", 140, 200, 255);
+    } else {
+        logf("localTestBot: net ped table full");
+    }
+}
+// Walk TestBot in a circle around the local player each tick (solo demo)
+static void tickLocalTestBot_SHV(DWORD now){
+    using namespace shv;
+    if(!g_localTestBotPed || !g_localPed) return;
+    NetPed* np = findNetPed("p9001");
+    if(!np || !np->ped) return;
+    // If network is driving this id with fresh updates, don't override
+    // (lastUpdate refreshed by net < 500ms ago and we got external packets)
+    static float ang = 0.f;
+    ang += 0.04f;
+    float x=g_shvLastPedCoords.x, y=g_shvLastPedCoords.y, z=g_shvLastPedCoords.z;
+    np->pos.x = x + cosf(ang) * 5.f;
+    np->pos.y = y + sinf(ang) * 5.f;
+    np->pos.z = z;
+    np->h = ang * 57.2957795f + 90.f;
+    while(np->h >= 360.f) np->h -= 360.f;
+    while(np->h < 0.f) np->h += 360.f;
+    np->lastUpdate = now;
+    // processNetPeds will lerp/set coords
+}
+
 static void __cdecl shvScriptMain(){
     logf("SHV scriptMain: entered (v" HOOK_VER ")");using namespace shv;
     const uint64_t H_PLAYER_ID=0x4F8644AF03D0E0D6ULL,H_PPID=0xD80958FC74E988A6ULL,H_GEC=0x3FEF770D40960D5AULL,H_GEH=0xE83D4F9BA2A38914ULL;
@@ -503,7 +576,12 @@ static void __cdecl shvScriptMain(){
     while(g_running){wait(0);DWORD now=timeGetTime();
         if(!g_localPed){static DWORD lt=0;if(now-lt>500){lt=now;pidx=Invoker(H_PLAYER_ID).reti();int p=Invoker(H_PPID).reti();if(p&&timeGetTime()-t0>8000){g_localPed=p;g_shvReady=true;logf("SHV READY: playerIdx=%d ped=0x%X (uptime=%ums) netPeds=%d",pidx,p,(unsigned)(timeGetTime()-t0),g_netPedCount);strcpy_s(g_f.err,"Scanning mem for ped...");sendJson("{\"t\":\"ready\",\"ped\":%d,\"uptime\":%lu}",p,(unsigned long)(timeGetTime()-t0));}else{static DWORD ll=0;if(now-ll>3000){ll=now;logf("SHV: waiting for ped... t=%ums p=%d",(unsigned)(timeGetTime()-t0),p);}}}continue;}
         // Apply remote-ped movement every tick (smooth)
-        if(now-lastNetTick>16){lastNetTick=now;processNetPeds(now);}
+        if(now-lastNetTick>16){lastNetTick=now;processNetPeds(now);tickLocalTestBot_SHV(now);}
+        // FiveM-style: ensure a visible remote clone exists for solo testing
+        static DWORD lastBotTry=0;
+        if(g_shvReady && !g_localTestBotStarted && now-lastBotTry>1000){
+            lastBotTry=now; ensureLocalTestBot_SHV();
+        }
         // Phase 6+7: nametags + chat HUD every frame (text natives are cheap)
         drawNametags();
         drawChatUI();
