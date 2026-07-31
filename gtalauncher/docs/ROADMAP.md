@@ -1,3 +1,24 @@
+# GTAMP
+
+## v1.6.0 file locations (no separate UPDATE pack)
+
+Built native files live here (what the launcher loads when packaged / in dev):
+
+| File | Path |
+|------|------|
+| Hook DLL | `gtalauncher/dist-bin/gtamp_hook.dll` |
+| Injector | `gtalauncher/dist-bin/gtamp_injector.exe` |
+| Same copies for client tree | `gtalauncher/src/client/native/` |
+| Hook source | `gtalauncher/src/native/hook/dllmain.cpp` |
+| Injector source | `gtalauncher/src/native/injector/main.cpp` |
+| Client bridge | `gtalauncher/src/client/client-bridge.js` |
+| Game server | `gtalauncher/src/fxserver/` |
+| Launcher main | `gtalauncher/src/main/main.js` |
+
+Packaged app maps `dist-bin/` → `resources/native/` via electron-builder `extraResources`.
+
+---
+
 # GTAMP Roadmap: From Launcher to Full Multiplayer
 
 This launcher is a solid foundation. FiveM and alt:V took teams years to build. Here's what's next.

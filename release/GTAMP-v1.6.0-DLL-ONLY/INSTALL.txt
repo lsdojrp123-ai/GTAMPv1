@@ -1,4 +1,0 @@
-Copy BOTH files into:
-  <your GTAMP launcher>\resources\native\
-
-Must use the launcher Connect/Play button (not Steam alone).

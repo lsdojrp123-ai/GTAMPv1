@@ -1,7 +1,21 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log
 
-# Large local builds (use GitHub Releases for binaries)
-GTAMP-Launcher-v*/
-GTAMP-v*-UPDATE/
+# Node
+node_modules/
+npm-debug.log*
+
+# Local Electron build output
+gtalauncher/dist/
+gtalauncher/dist-bin/*.pdb
+
+# Don't ship side "UPDATE" packs in repo — binaries live in dist-bin/
+release/
+GTAMP-*-UPDATE*/
+GTAMP-*-RECOVERY*/
+UPDATE-HOOK-ONLY*/
 EXE-PARTS/
 *.exe.OLD
-/release/*.exe
+GTAMP-Launcher-v*/
