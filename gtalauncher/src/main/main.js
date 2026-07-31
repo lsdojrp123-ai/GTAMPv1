@@ -458,28 +458,28 @@ function detectLauncher(gtaPath) {
 }
 
 function findLauncher(launcherType, gtaPath) {
+  // Prefer GTA5.exe DIRECTLY. PlayGTAV/RGL often flash Rockstar UI then exit for 2nd PC.
+  // GTAMP multiplayer is our UDP stack; we only need the game process running.
+  const gta5 = path.join(gtaPath, 'GTA5.exe');
   const playGTA = path.join(gtaPath, 'PlayGTAV.exe');
-  // Boot GTA offline from Rockstar Online / Social Club online services.
-  // GTAMP multiplayer is OUR network (UDP), not R* Online. Flags prevent GTA Online boot.
-  // Borderless/windowed so the GTAMP overlay can draw.
-  const w = config.windowed !== false; // default true so overlay works
-  const offArgs = ['-scOfflineOnly','-disablenetwork','-nostraighttofreemode','-borderless'];
+  const w = config.windowed !== false;
+  // Minimal args: skip GTA Online, stay windowed for overlay. Avoid -disablenetwork (can hard-exit some installs).
+  const offArgs = ['-scOfflineOnly', '-nostraighttofreemode', '-borderless'];
   if (w) offArgs.push('-windowed');
+
+  if (fs.existsSync(gta5)) return { exe: gta5, args: offArgs, kind: 'gta5' };
   if (fs.existsSync(playGTA)) return { exe: playGTA, args: offArgs, kind: 'playgtav' };
-  if (launcherType === 'steam')
-    return { exe: 'cmd.exe', args:['/c','start','steam://rungameid/271590//-scOfflineOnly/-windowed'], kind:'steam' };
-  if (launcherType === 'epic')
-    return { exe: 'cmd.exe', args:['/c','start','com.epicgames.launcher://apps/9d2d0eb6f1c04d4b8b86e2ce4f4f584b%3A9d2d0eb6f1c04d4b8b86e2ce4f4f584b%3AHeather?action=launch&silent=true'], kind:'epic' };
-  try {
-    const pf = process.env['ProgramFiles'] || 'C:\\Program Files';
-    const pf86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
-    for (const pre of [pf, pf86]) {
-      const rgl = path.join(pre, 'Rockstar Games','Launcher','Launcher.exe');
-      if (fs.existsSync(rgl)) return { exe: rgl, args:['-scOfflineOnly'], kind:'rockstar' };
-    }
-  } catch {}
+
+  // Steam: still try direct GTA5 under common path first was done above via gtaPath
+  if (launcherType === 'steam') {
+    // Last resort steam protocol (unreliable for 2nd client)
+    return { exe: 'cmd.exe', args: ['/c', 'start', '', 'steam://rungameid/271590//-scOfflineOnly/-windowed/-borderless'], kind: 'steam' };
+  }
+  if (launcherType === 'epic') {
+    return { exe: 'cmd.exe', args: ['/c', 'start', '', 'com.epicgames.launcher://apps/9d2d0eb6f1c04d4b8b86e2ce4f4f584b%3A9d2d0eb6f1c04d4b8b86e2ce4f4f584b%3AHeather?action=launch&silent=true'], kind: 'epic' };
+  }
   const gl = path.join(gtaPath, 'GTAVLauncher.exe');
-  if (fs.existsSync(gl)) return { exe: gl, args:['-scOfflineOnly'], kind:'gtavlauncher' };
+  if (fs.existsSync(gl)) return { exe: gl, args: offArgs, kind: 'gtavlauncher' };
   return null;
 }
 
@@ -707,9 +707,12 @@ ipcMain.handle('game:launch', (_e, {serverAddr} = {}) => {
 
   try {
     const useShell = launch.kind === 'steam' || launch.kind === 'epic';
+    writeLaunchDiag(['launching kind=' + launch.kind, 'exe=' + launch.exe, 'args=' + JSON.stringify(launch.args)]);
     gameProc = spawn(launch.exe, launch.args, {
-      cwd: fs.existsSync(launch.exe) && !launch.exe.toLowerCase().endsWith('cmd.exe') ? path.dirname(launch.exe) : config.gtaPath,
-      detached: true, stdio:'ignore', shell: useShell, windowsHide:false
+      cwd: (launch.kind === 'gta5' || launch.kind === 'playgtav')
+        ? config.gtaPath
+        : (fs.existsSync(launch.exe) && !launch.exe.toLowerCase().endsWith('cmd.exe') ? path.dirname(launch.exe) : config.gtaPath),
+      detached: true, stdio: 'ignore', shell: useShell, windowsHide: false
     });
     gameProc.unref();
     gameProc.on('error', e => console.error('[Main] game launch error:', e.message));
