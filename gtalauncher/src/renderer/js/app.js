@@ -78,6 +78,15 @@ async function init() {
   safeBind('btn-history', ()=>switchView('history'));
   safeBind('btn-host', ()=>switchView('host'));
   safeBind('btn-refresh', ()=>{refreshPing();scanLAN();toast('Refreshing...');});
+  safeBind('btn-inject', async ()=>{
+    toast('Injecting GTAMP hook...','info');
+    logConsole('Injecting GTAMP hook into GTA5.exe...','info');
+    try {
+      const r = await window.gtamp.hook.inject();
+      if (r && r.ok) toast('Injection started. Check %TEMP%\\gtamp_injector.log','ok');
+      else toast('Inject failed: ' + (r && r.error || 'unknown'),'err');
+    } catch(e){ toast('Inject error: '+e.message,'err'); }
+  });
   safeBind('feat-host-big', ()=>switchView('host'));
   safeBind('btn-add', ()=>{switchView('direct');focusId('direct-addr');});
   safeBind('btn-settings', ()=>switchView('settings'));

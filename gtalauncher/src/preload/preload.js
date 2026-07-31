@@ -50,7 +50,8 @@ contextBridge.exposeInMainWorld('gtamp', {
   },
   hook: {
     status: () => ipcRenderer.invoke('hook:status'),
-    send: (obj) => ipcRenderer.invoke('hook:send', obj)
+    send: (obj) => ipcRenderer.invoke('hook:send', obj),
+    inject: () => ipcRenderer.invoke('game:inject')
   },
   on: (channel, cb) => {
     const allowed = ['game:status', 'master:update', 'server:info', 'hook:status', 'hook:event'];

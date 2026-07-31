@@ -945,27 +945,27 @@ ipcMain.handle('game:launch', (_e, {serverAddr} = {}) => {
       'NOTE: injector log also at %TEMP%\\gtamp_injector.log'
     ]);
 
-    // Inject after GTA process exists. 15s default (was 30s).
-    const injectDelayMs = (launch && launch.injectWaitMs) || 90000;
-    setTimeout(() => {
+    // Inject when GTA5.exe appears (watcher — more robust than a single fixed delay).
+    // Polls tasklist every 2s for up to ~3 min, so a fresh OR already-running GTA is
+    // caught. A manual INJECT button in the top bar forces injection anytime too.
+    const injectUntil = Date.now() + ((launch && launch.injectWaitMs) || 180000);
+    const waitForInject = () => {
+      if (Date.now() > injectUntil) return;
+      let found = false;
       try {
-        if (fs.existsSync(injectorPath) && fs.existsSync(dllPath)) {
-          writeLaunchDiag(['spawning injector now', injectorPath, dllPath]);
-          injectorProc = spawn(injectorPath, ['--process','GTA5.exe','--dll',dllPath,'--timeout','180000'],
-            { detached:true, stdio: isDev ? 'inherit' : 'ignore', windowsHide:true });
-          injectorProc.unref();
-          injectorProc.on('error', e => writeLaunchDiag(['injector process error: ' + e.message]));
-        } else {
-          const msg = 'Injector/DLL NOT FOUND at ' + nativeDir +
-            ' — copy gtamp_hook.dll + gtamp_injector.exe into resources\\native\\';
-          console.log('[Main]', msg);
-          writeLaunchDiag([msg]);
-        }
-      } catch (e) {
-        console.error('[Main] injector spawn error:', e);
-        writeLaunchDiag(['injector spawn exception: ' + e.message]);
+        const out = require('child_process').execSync(
+          'tasklist /FI "IMAGENAME eq GTA5.exe" /NH', { windowsHide:true, encoding:'utf8', timeout:5000 }) || '';
+        found = /GTA5\.exe/i.test(out);
+      } catch { found = false; }
+      if (found) {
+        writeLaunchDiag(['GTA5.exe detected — injecting GTAMP hook']);
+        runInjector();
+      } else {
+        setTimeout(waitForInject, 2000);
       }
-    }, injectDelayMs);
+    };
+    writeLaunchDiag(['inject watcher started (checks for GTA5.exe every 2s, up to 3 min)']);
+    setTimeout(waitForInject, 8000);
 
     // Hook proxy for renderer (control channel)
     try { hookConnect(); } catch(e) { console.log('[Main] hookConnect err', e.message); }
@@ -991,6 +991,46 @@ function addToHistory(entry) {
   if (config.history.length > 20) config.history = config.history.slice(0, 20);
   saveConfig(config);
 }
+
+// ---------- Manual + robust auto-inject ----------
+function nativeDirs() {
+  const dirs = [];
+  if (app.isPackaged && process.resourcesPath) dirs.push(path.join(process.resourcesPath, 'native'));
+  dirs.push(path.join(__dirname, '..', '..', 'dist-bin'));
+  dirs.push(path.join(__dirname, '..', '..', '..', 'dist-bin'));
+  return dirs;
+}
+function findNativeFile(file) {
+  for (const d of nativeDirs()) {
+    try { if (d && fs.existsSync(path.join(d, file))) return path.join(d, file); } catch {}
+  }
+  return null;
+}
+let injectAttempt = 0;
+function runInjector() {
+  const dllPath = findNativeFile('gtamp_hook.dll');
+  const injPath = findNativeFile('gtamp_injector.exe');
+  if (!dllPath || !injPath) {
+    const msg = 'Injector/DLL NOT FOUND (looked in: ' + nativeDirs().join(', ') + ')';
+    console.log('[Main]', msg);
+    writeLaunchDiag([msg]);
+    return { ok:false, error: msg };
+  }
+  injectAttempt++;
+  try {
+    injectorProc = spawn(injPath, ['--process','GTA5.exe','--dll',dllPath,'--timeout','180000'],
+      { detached:true, stdio: isDev ? 'inherit' : 'ignore', windowsHide:true });
+    injectorProc.unref();
+    injectorProc.on('error', e => writeLaunchDiag(['injector process error: ' + e.message]));
+    writeLaunchDiag(['spawning injector (attempt ' + injectAttempt + ')', injPath, dllPath]);
+    return { ok:true, injector: injPath, dll: dllPath, attempt: injectAttempt };
+  } catch (e) {
+    console.error('[Main] injector spawn error:', e);
+    writeLaunchDiag(['injector spawn exception: ' + e.message]);
+    return { ok:false, error: e.message };
+  }
+}
+ipcMain.handle('game:inject', () => runInjector());
 
 ipcMain.handle('history:add', (_e, entry) => { addToHistory(entry); return config.history; });
 ipcMain.handle('bookmarks:add', (_e, srv) => {
