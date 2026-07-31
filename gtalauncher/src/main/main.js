@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
 const os = require('os');
+const net = require('net');
 function writeLaunchDiag(lines) {
   try {
     const text = lines.join('\n') + '\n';
@@ -21,8 +22,112 @@ let bridgeProc = null;
 let gameProc = null;
 let injectorProc = null;
 let hostedServers = [];
+
 let hookClient = null;
 let hookConnected = false;
+
+// ============================================================
+// Built-in hook TCP server (port 22100)
+// Always available so the DLL can connect even if client-bridge.js fails.
+// Provides solo TestBot netPed stream for Phase 6 playtest.
+// ============================================================
+let hookTcpServer = null;
+const hookSockets = new Set();
+let soloBotTimer = null;
+let lastHookPos = { x: 0, y: 0, z: 72, h: 0 };
+
+function hookBroadcast(obj) {
+  const line = JSON.stringify(obj) + '\n';
+  for (const s of hookSockets) {
+    try { if (s.writable) s.write(line); } catch {}
+  }
+}
+
+function startSoloBot() {
+  if (soloBotTimer) return;
+  writeLaunchDiag(['solo TestBot stream starting on hook TCP']);
+  let ang = 0;
+  // Initial spawn
+  const sx = lastHookPos.x + 4, sy = lastHookPos.y, sz = lastHookPos.z;
+  hookBroadcast({
+    t: 'netPed', id: 'p9001', name: 'TestBot', model: 'mp_m_freemode_01',
+    x: sx, y: sy, z: sz, h: 0, health: 200
+  });
+  soloBotTimer = setInterval(() => {
+    ang += 0.05;
+    const x = (lastHookPos.x || 0) + Math.cos(ang) * 5;
+    const y = (lastHookPos.y || 0) + Math.sin(ang) * 5;
+    const z = lastHookPos.z || 72;
+    let h = ang * 180 / Math.PI + 90;
+    h = ((h % 360) + 360) % 360;
+    hookBroadcast({
+      t: 'netPedPos', id: 'p9001', name: 'TestBot', model: 'mp_m_freemode_01',
+      x, y, z, h, health: 200
+    });
+  }, 66);
+}
+
+function ensureHookTcpServer() {
+  if (hookTcpServer) return;
+  try {
+    hookTcpServer = net.createServer((socket) => {
+      writeLaunchDiag(['hook DLL connected to built-in TCP 22100']);
+      hookSockets.add(socket);
+      socket.setEncoding('utf8');
+      let buf = '';
+      socket.on('data', (d) => {
+        buf += d;
+        const lines = buf.split('\n');
+        buf = lines.pop();
+        for (const l of lines) {
+          if (!l.trim()) continue;
+          let m; try { m = JSON.parse(l); } catch { continue; }
+          if (m.t === 'hookHello') {
+            writeLaunchDiag(['hookHello v=' + (m.v||'?') + ' gta=' + (m.gta||'?')]);
+            // If we already have a position, start bot soon
+            setTimeout(() => startSoloBot(), 2000);
+          } else if (m.t === 'ready') {
+            writeLaunchDiag(['hook SHV ready ped=' + m.ped]);
+            startSoloBot();
+          } else if (m.t === 'pos') {
+            if (typeof m.x === 'number') {
+              lastHookPos.x = m.x; lastHookPos.y = m.y; lastHookPos.z = m.z;
+              lastHookPos.h = m.h || 0;
+            }
+            // Start bot once we have real coords
+            if (!soloBotTimer && (m.x || m.y)) startSoloBot();
+          } else if (m.t === 'chat') {
+            const raw = (m.msg || '').toString().trim();
+            const cmd = raw.replace(/^\//, '').split(/\s+/)[0].toLowerCase();
+            if (cmd === 'spawncop' || cmd === 'spawn') {
+              hookBroadcast({ t: 'spawnPed', src: 'CMD', model: 's_m_y_cop_01', offset: true, pedType: 6 });
+              writeLaunchDiag(['built-in handled cmd ' + cmd]);
+            }
+          } else if (m.t === 'spawn') {
+            writeLaunchDiag(['hook spawn ack ped=' + m.ped + ' ok=' + m.ok]);
+          }
+        }
+      });
+      socket.on('close', () => {
+        hookSockets.delete(socket);
+        writeLaunchDiag(['hook DLL disconnected from 22100']);
+      });
+      socket.on('error', () => hookSockets.delete(socket));
+    });
+    hookTcpServer.on('error', (e) => {
+      writeLaunchDiag(['hook TCP server error: ' + e.message + ' (bridge may already own 22100)']);
+      hookTcpServer = null;
+    });
+    hookTcpServer.listen(22100, '127.0.0.1', () => {
+      writeLaunchDiag(['built-in hook TCP listening 127.0.0.1:22100']);
+      console.log('[Main] built-in hook TCP on 127.0.0.1:22100');
+    });
+  } catch (e) {
+    writeLaunchDiag(['ensureHookTcpServer failed: ' + e.message]);
+  }
+}
+
+
 // hostedServers already declared above (line 13) — do NOT redeclare
 
 // ============================================================
@@ -212,6 +317,7 @@ function createWindow() {
 
 // ---------- Lifecycle ----------
 app.whenReady().then(async () => {
+  try { ensureHookTcpServer(); } catch (e) { console.error(e); }
   ensureDataDirs();
   if (!config.gtaPath) {
     try { const d = await detectGTAPath(); if (d) { config.gtaPath = d; saveConfig(config); } } catch {}
@@ -359,63 +465,9 @@ ipcMain.handle('game:launch', (_e, {serverAddr} = {}) => {
   const platformUrl = fxServerInfo?.platformUrl || 'http://127.0.0.1:22003';
   const effectiveAddr = serverAddr || `${host}:${gamePort}`;
 
-  // Start client bridge (TCP 22100 for hook). Log to %TEMP%\gtamp_bridge.log
-  try {
-    if (bridgeProc && !bridgeProc.killed) bridgeProc.kill();
-    const bridgeLog = path.join(require('os').tmpdir(), 'gtamp_bridge.log');
-    const bridgeExists = fs.existsSync(clientBridgePath);
-    writeLaunchDiag([
-      'starting client bridge',
-      'bridgePath=' + clientBridgePath,
-      'bridgeExists=' + bridgeExists,
-      'bridgeLog=' + bridgeLog,
-      'server=' + effectiveAddr
-    ]);
-    if (!bridgeExists) {
-      writeLaunchDiag(['FATAL: client-bridge.js not found — multiplayer will not work']);
-    } else {
-      let logFd = 'ignore';
-      try {
-        fs.writeFileSync(bridgeLog, '');
-        logFd = fs.openSync(bridgeLog, 'a');
-      } catch {}
-      // Resolve ws: prefer unpacked node_modules, then app root node_modules (dev)
-      const nodePathParts = [
-        path.join(process.resourcesPath || '', 'app.asar.unpacked', 'node_modules'),
-        path.join(process.resourcesPath || '', 'app.asar.unpacked', 'src', 'node_modules'),
-        path.join(path.dirname(clientBridgePath), 'node_modules'),
-        path.join(__dirname, '..', '..', 'node_modules'),
-        process.env.NODE_PATH || ''
-      ].filter(Boolean);
-      bridgeProc = spawn(process.execPath, [clientBridgePath], {
-        cwd: path.dirname(clientBridgePath),
-        env: {
-          ...process.env,
-          GTAMP_SERVER: effectiveAddr,
-          GTAMP_NICK: config.nickname || 'Player',
-          GTAMP_RES_PORT: String(resPort),
-          GTAMP_PLATFORM_URL: platformUrl,
-          GTAMP_CACHE_DIR: path.join(fivemStyleDataDir, 'cache'),
-          ELECTRON_RUN_AS_NODE: '1',
-          NODE_PATH: nodePathParts.join(path.delimiter)
-        },
-        detached: true,
-        stdio: isDev ? 'inherit' : ['ignore', logFd, logFd],
-        windowsHide: true
-      });
-      bridgeProc.unref();
-      bridgeProc.on('error', e => {
-        console.error('[Main] bridge error:', e.message);
-        writeLaunchDiag(['bridge error: ' + e.message]);
-      });
-      bridgeProc.on('exit', (code, sig) => {
-        writeLaunchDiag(['bridge exited code=' + code + ' signal=' + sig]);
-      });
-    }
-  } catch (e) {
-    console.error('[Main] bridge spawn error:', e);
-    writeLaunchDiag(['bridge spawn exception: ' + e.message]);
-  }
+  // Built-in hook TCP on 22100: TestBot + spawncop (no external bridge required)
+  try { ensureHookTcpServer(); } catch (e) { writeLaunchDiag(['ensureHookTcpServer: ' + e.message]); }
+
 
   if (process.platform !== 'win32') {
     config.lastServer = effectiveAddr; saveConfig(config);
@@ -544,7 +596,6 @@ ipcMain.handle('server:hostStop', async () => {
 });
 
 // ---- Hook control proxy (TCP client to bridge on 127.0.0.1:22102) ----
-const net = require('net');
 function hookConnect() {
   const tryConnect = () => {
     if (hookClient && !hookClient.destroyed) return;
