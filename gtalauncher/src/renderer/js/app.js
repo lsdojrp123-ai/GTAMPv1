@@ -61,6 +61,7 @@ async function init() {
   safeBind('hc-host-btn', ()=>{switchView('host');openPanel();});
   safeBind('hc-host-btn2', ()=>{switchView('host');openPanel();});
   safeBind('home-settings-btn', ()=>{switchView('settings');openPanel();});
+  safeBind('home-settings2', ()=>{switchView('settings');openPanel();});
   safeBind('lan-scan', scanLAN);
   const hdi = document.getElementById('home-direct-input');
   if (hdi) hdi.addEventListener('keydown', e => { if (e.key==='Enter') homeDirectGo(); });
