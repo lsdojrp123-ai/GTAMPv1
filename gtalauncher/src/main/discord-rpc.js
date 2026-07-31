@@ -5,6 +5,9 @@
 
 const path = require('path');
 
+// Built-in GTAMP Discord Application ID (used automatically when none is set in Settings).
+const DEFAULT_CLIENT_ID = '1532843546640384311';
+
 let rpc = null;
 let ready = false;
 let enabled = true;
@@ -55,7 +58,7 @@ function applyActivity() {
  */
 function start(opts = {}) {
   enabled = opts.enabled !== false;
-  clientId = String(opts.clientId || process.env.GTAMP_DISCORD_APP_ID || '').trim();
+  clientId = String(opts.clientId || process.env.GTAMP_DISCORD_APP_ID || '').trim() || DEFAULT_CLIENT_ID;
   if (!enabled) {
     stop();
     return { ok: false, error: 'disabled' };

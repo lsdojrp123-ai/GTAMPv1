@@ -418,7 +418,7 @@ const defaultConfig = {
   windowed: false,
   fullscreenBorderless: true,
   discordRpc: true,
-  discordAppId: '', // Discord Developer Portal Application ID
+  discordAppId: '1532843546640384311', // Discord Developer Portal Application ID (GTAMP app)
   voiceEnabled: true,
   ptt: true,
   voiceVolume: 70,
