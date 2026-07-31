@@ -459,9 +459,9 @@ function detectLauncher(gtaPath) {
 
 function findLauncher(launcherType, gtaPath) {
   const playGTA = path.join(gtaPath, 'PlayGTAV.exe');
-  // Boot GTA into offline borderless windowed story mode. This prevents:
-  //   - boot into GTA Online (no -StraightIntoFreemode)
-  //   - exclusive fullscreen from blocking our overlay (we need -windowed + no -fullscreen)
+  // Boot GTA offline from Rockstar Online / Social Club online services.
+  // GTAMP multiplayer is OUR network (UDP), not R* Online. Flags prevent GTA Online boot.
+  // Borderless/windowed so the GTAMP overlay can draw.
   const w = config.windowed !== false; // default true so overlay works
   const offArgs = ['-scOfflineOnly','-disablenetwork','-nostraighttofreemode','-borderless'];
   if (w) offArgs.push('-windowed');

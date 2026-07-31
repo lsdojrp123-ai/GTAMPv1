@@ -605,7 +605,7 @@ async function connectTo(s) {
     'Retrieving server information','Initializing network','Handshaking with FXServer',
     'Discovering resources','Downloading chat','Downloading freeroam',
     'Downloading spawnmanager','Downloading voice','Loading client scripts & NUI',
-    'Requesting spawn, launching GTA V (offline story mode)','Injecting GTAMP hook',
+    'Requesting spawn, launching GTA V (GTAMP session)','Injecting GTAMP hook',
     'Finalizing connection'
   ];
   const RESOURCES = ['chat','freeroam','spawnmanager','voice','chat NUI'];
@@ -633,7 +633,7 @@ async function connectTo(s) {
       }
     }
   }
-  if (stage) stage.textContent = 'Connected! Launching GTA V (offline story mode)...';
+  if (stage) stage.textContent = 'Connected to GTAMP — launching GTA V...';
   await new Promise(r=>setTimeout(r,800));
   // Actually launch via main
   try {
@@ -648,14 +648,14 @@ async function connectTo(s) {
       dialogMessage('Launch error', res.error);
       return;
     }
-    toast('Launched GTA V into offline story mode. The GTAMP hook will load in ~30s and you\'ll see an on-screen status.','ok');
-    logConsole(`Launched GTA V targeting server ${s.addr} (offline mode, hook injects in ~30s)`,'ok');
+    toast('GTAMP session started. GTA launches offline from Rockstar Online (our multiplayer). Hook loads in ~15–30s.','ok');
+    logConsole(`GTAMP multiplayer -> ${s.addr} (Rockstar Online disabled; GTAMP hook injects in ~15-30s)`,'ok');
     // Add to history
     state.config.history = [{name:s.name,addr:s.addr,mode:s.mode||'Direct',joinedAt:Date.now()},...(state.config.history||[])].slice(0,20);
     window.gtamp.history.add({name:s.name,addr:s.addr,mode:s.mode||'Direct',joinedAt:Date.now()}).catch(()=>{});
     window.gtamp.config.set(state.config).catch(()=>{});
     renderHistory();
-    toast(`Connected to ${s.name}`,'ok');
+    toast(`Joined ${s.name} — multiplayer via GTAMP`,'ok');
     logConsole(`Connected to ${s.name} (${s.addr})`,'ok');
   } catch(e) {
     console.error(e);
