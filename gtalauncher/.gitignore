@@ -1,9 +1,4 @@
 node_modules/
 dist/
-out/
 *.log
 .DS_Store
-config.json
-src/preload/*.map
-src/renderer/**/*.map
-.env
