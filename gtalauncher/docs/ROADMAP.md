@@ -1,3 +1,11 @@
+# GTAMP Roadmap
+
+> **North star:** FiveM-inspired multiplayer, **our own code**.  
+> See [ARCHITECTURE.md](./ARCHITECTURE.md) for topology, design rules, and the build ladder.  
+> We will sit on this for days/weeks — scaffolds (TestBot, frozen peds) are steps, not the destination.
+
+---
+
 # GTAMP
 
 ## v1.6.0 file locations (no separate UPDATE pack)

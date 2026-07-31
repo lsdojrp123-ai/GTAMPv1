@@ -1,5 +1,12 @@
 # GTAMP Launcher
 
+**Goal:** A GTA V multiplayer client/server that *works like* FiveM/alt:V, written as **our own codebase**, inspired by how those platforms are structured — not a rebrand of their binaries.
+
+Read **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** first (north star + ladder).  
+Playtest: run repo-root `GTAMP-Launcher-v1.5.2.exe` (or build via `npm run dist`).
+
+---
+
 A FiveM / alt:V-style GTA V multiplayer launcher with a working UDP multiplayer proof-of-concept. Built with Electron.
 
 ![GTAMP](build/icon.png)
