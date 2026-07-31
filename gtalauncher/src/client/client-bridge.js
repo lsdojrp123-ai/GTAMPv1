@@ -71,6 +71,17 @@ function flushHookQueue() {
     try { state.hook.write(line); } catch(e) { state.hookQueue.unshift(line); break; }
   }
 }
+// Hook reconnects are independent of the UDP session. Rebuild its remote-ped
+// state from the authoritative bridge player map after every TCP connection.
+function syncRemotePedsToHook() {
+  hookSend({ t: 'netPedClear' });
+  for (const p of state.players.values()) {
+    if (p.netId === state.netId) continue;
+    const pos = p.pos || { x: 0, y: 0, z: 72 };
+    hookSend({ t: 'netPed', id: 'p' + p.netId, name: p.name || ('Player' + p.netId),
+      model: p.model || 's_m_y_cop_01', x: pos.x, y: pos.y, z: pos.z, h: p.h || 0 });
+  }
+}
 
 // ---- Resources (stages 6+7+8) ----
 const resourceVMs = new Map();
@@ -351,6 +362,8 @@ async function handleServerPacket(pkt) {
       break;
     }
     case 'playerJoin': {
+      // The server broadcasts joins globally; never create a remote copy of ourselves.
+      if (pkt.netId === state.netId) break;
       const p = {
         netId: pkt.netId, name: pkt.name, pos: pkt.pos||{x:0,y:0,z:0}, h: pkt.h||0,
         health: pkt.health||200, model: pkt.model||'s_m_y_cop_01', vehicle: pkt.vehicle||0
@@ -365,6 +378,7 @@ async function handleServerPacket(pkt) {
       break;
     }
     case 'playerLeft':
+      if (pkt.netId === state.netId) break;
       state.players.delete(pkt.netId);
       hookSend({ t:'netPedDel', id: 'p'+pkt.netId });
       broadcastWS({ t: 'playerLeft', netId: pkt.netId, name: pkt.name });
@@ -372,6 +386,7 @@ async function handleServerPacket(pkt) {
       console.log(`[Client] - player ${pkt.name}`);
       break;
     case 'playerPos': {
+      if (pkt.netId === state.netId) break;
       // Position update for one remote player (server sends at ~15-20Hz)
       const p = state.players.get(pkt.netId);
       if (!p) {
@@ -436,8 +451,9 @@ async function handleServerPacket(pkt) {
 const tcpServer = net.createServer((socket) => {
   console.log('[Client] hook connected');
   state.hook = socket;
-  // Flush anything queued while hook was offline (e.g. server welcome spawns)
+  // Flush anything queued while hook was offline, then rebuild remote lifecycle state.
   flushHookQueue();
+  syncRemotePedsToHook();
   socket.setEncoding('utf8');
   let buf = '';
   socket.on('data', (d) => {

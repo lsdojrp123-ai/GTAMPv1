@@ -1,4 +1,4 @@
-/* GTAMP Hook v1.5.2 - Phase 5: remote player position sync (cross-thread native-call fix). */
+/* GTAMP Hook v1.5.3 - Phase 6: remote-player lifecycle and name tags. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <winsock2.h>
@@ -17,9 +17,9 @@
 #pragma comment(lib,"version.lib")
 #pragma comment(lib,"winmm.lib")
 
-#define HOOK_VER "1.5.2"
+#define HOOK_VER "1.5.3"
 #define OVERLAY_KEY RGB(255,0,255)
-#define OV_CLASS "GTAMP_OV152"
+#define OV_CLASS "GTAMP_OV153"
 static volatile bool g_running=true;
 static HANDLE g_ovT=NULL, g_netT=NULL;
 static HWND g_ov=NULL, g_gta=NULL;
@@ -40,7 +40,7 @@ static int g_localPed=0;
 struct SpawnReq{char src[8];char model[64];float x,y,z,h;bool useOffset;int pedType;};
 // Remote players (server-broadcast). NetPlayerId -> ped handle + state.
 #define NET_PED_MAX 32
-struct NetPed{int used;char id[32];char name[32];char model[64];int ped;Vec3 pos;float h;DWORD lastUpdate;};
+struct NetPed{int used;char id[32];char name[32];char model[64];int ped;int spawnPending;Vec3 pos;float h;DWORD lastUpdate;};
 static NetPed g_netPeds[NET_PED_MAX];
 // Ring-buffer queue so spawns that arrive before SHV ready are NOT dropped.
 #define SPAWN_Q_SIZE 16
@@ -139,6 +139,21 @@ static void queueNpCmd(const NpCmd*c){
     LeaveCriticalSection(&g_npCs);
 }
 // SHV-fiber-only: actually delete a netPed's entity and free slot.
+// SHV-fiber setup: packets may arrive before the local player is ready.
+// Queue one spawn per known remote once SHV becomes ready.
+static void queuePendingNetPedSpawns(){
+    EnterCriticalSection(&g_npCs);
+    for(int i=0;i<NET_PED_MAX;i++){
+        NetPed*np=&g_netPeds[i];
+        if(!np->used||np->ped||np->spawnPending)continue;
+        NpCmd c={0};c.op=NQ_SPAWN;sstrcpy(c.id,np->id,sizeof(c.id));sstrcpy(c.name,np->name,sizeof(c.name));sstrcpy(c.model,np->model,sizeof(c.model));
+        c.x=np->pos.x;c.y=np->pos.y;c.z=np->pos.z;c.h=np->h;np->spawnPending=1;
+        LONG t=g_npTail;g_npQ[((int)t)&(NP_Q_SIZE-1)]=c;g_npTail=t+1;
+        if(g_npTail-g_npHead>NP_Q_SIZE){g_npHead=g_npTail-NP_Q_SIZE;logf("npQ: overflow, dropped oldest");}
+        logf("net: queued pending remote ped id=%s after SHV ready",np->id);
+    }
+    LeaveCriticalSection(&g_npCs);
+}
 static void deleteNetPed_SHV(NetPed*np){
     using namespace shv;
     if(!np)return;
@@ -188,6 +203,22 @@ static int doSpawnPed(const char*modelName,float x,float y,float z,float h,int p
     }
     return np;
 }
+static void drawNetPedName(const NetPed*np){
+    using namespace shv;
+    if(!np||!np->ped||!np->name[0])return;
+    const uint64_t H_SET_DRAW_ORIGIN=0xAA0008F3BBB8F416ULL,H_CLEAR_DRAW_ORIGIN=0xFF0B610F6BE0D7AFULL,
+                   H_BEGIN_TEXT=0x25FBB336DF1804CBULL,H_ADD_TEXT=0x6C188BE134E074AAULL,
+                   H_END_TEXT=0xCD015E5BB0D96A57ULL,H_SET_SCALE=0x07C837F9A01C34C9ULL,
+                   H_SET_FONT=0x66E0276CC5F6B9DAULL,H_SET_PROP=0x038C1F517D7FDCF8ULL,
+                   H_SET_COLOUR=0xBE6B23FFA53FB442ULL,H_SET_CENTRE=0xC02F4DBFB51D988BULL,
+                   H_SET_OUTLINE=0x2513DFB0FB8400FEULL;
+    Invoker(H_SET_DRAW_ORIGIN).argf(np->pos.x).argf(np->pos.y).argf(np->pos.z+1.15f).argi(0).retv();
+    Invoker(H_SET_SCALE).argf(0.0f).argf(0.30f).retv(); Invoker(H_SET_FONT).argi(0).retv();
+    Invoker(H_SET_PROP).argb(true).retv(); Invoker(H_SET_COLOUR).argi(255).argi(255).argi(255).argi(220).retv();
+    Invoker(H_SET_CENTRE).argb(true).retv(); Invoker(H_SET_OUTLINE).retv();
+    Invoker(H_BEGIN_TEXT).argp((void*)"STRING").retv(); Invoker(H_ADD_TEXT).argp((void*)np->name).retv();
+    Invoker(H_END_TEXT).argf(0.0f).argf(0.0f).argi(0).retv(); Invoker(H_CLEAR_DRAW_ORIGIN).retv();
+}
 static void processNetPeds(DWORD now){
     using namespace shv;
     const uint64_t H_SET_COORDS=0x239A3351AC1DA385ULL,H_SET_HEADING=0x8E2530AA8ADA980EULL,H_DOES_ENTITY_EXIST=0x7239B21A38F536BAULL;
@@ -198,9 +229,10 @@ static void processNetPeds(DWORD now){
         if(np->lastUpdate!=0 && now-np->lastUpdate>6000){logf("netPed: id=%s timed out (%.1fs), removing",np->id,(now-np->lastUpdate)/1000.0);deleteNetPed_SHV(np);i--;continue;}
         if(!np->ped)continue;
         int exists=Invoker(H_DOES_ENTITY_EXIST).argi(np->ped).reti();
-        if(!exists){logf("netPed: id=%s ped=%d no longer exists, clearing handle (will respawn)",np->id,np->ped);np->ped=0;continue;}
+        if(!exists){logf("netPed: id=%s ped=%d no longer exists, clearing handle (will respawn)",np->id,np->ped);np->ped=0;np->spawnPending=0;continue;}
         Invoker(H_SET_COORDS).argi(np->ped).argf(np->pos.x).argf(np->pos.y).argf(np->pos.z).argb(false).argb(false).argb(false).retv();
         Invoker(H_SET_HEADING).argi(np->ped).argf(np->h).retv();
+        drawNetPedName(np);
     }
 }
 static void __cdecl shvScriptMain(){
@@ -208,7 +240,7 @@ static void __cdecl shvScriptMain(){
     const uint64_t H_PLAYER_ID=0x4F8644AF03D0E0D6ULL,H_PPID=0xD80958FC74E988A6ULL,H_GEC=0x3FEF770D40960D5AULL,H_GEH=0xE83D4F9BA2A38914ULL;
     wait(5000);logf("SHV: initial 5s wait done.");int pidx=0;DWORD lastTick=0,lastPosSend=0,lastNetTick=0;DWORD t0=timeGetTime();
     while(g_running){wait(0);DWORD now=timeGetTime();
-        if(!g_localPed){static DWORD lt=0;if(now-lt>500){lt=now;pidx=Invoker(H_PLAYER_ID).reti();int p=Invoker(H_PPID).reti();if(p&&timeGetTime()-t0>8000){g_localPed=p;g_shvReady=true;logf("SHV READY: playerIdx=%d ped=0x%X (uptime=%ums) netPeds=%d",pidx,p,(unsigned)(timeGetTime()-t0),g_netPedCount);strcpy_s(g_f.err,"Scanning mem for ped...");sendJson("{\"t\":\"ready\",\"ped\":%d,\"uptime\":%lu}",p,(unsigned long)(timeGetTime()-t0));}else{static DWORD ll=0;if(now-ll>3000){ll=now;logf("SHV: waiting for ped... t=%ums p=%d",(unsigned)(timeGetTime()-t0),p);}}}continue;}
+        if(!g_localPed){static DWORD lt=0;if(now-lt>500){lt=now;pidx=Invoker(H_PLAYER_ID).reti();int p=Invoker(H_PPID).reti();if(p&&timeGetTime()-t0>8000){g_localPed=p;g_shvReady=true;logf("SHV READY: playerIdx=%d ped=0x%X (uptime=%ums) netPeds=%d",pidx,p,(unsigned)(timeGetTime()-t0),g_netPedCount);strcpy_s(g_f.err,"Scanning mem for ped...");sendJson("{\"t\":\"ready\",\"ped\":%d,\"uptime\":%lu}",p,(unsigned long)(timeGetTime()-t0));queuePendingNetPedSpawns();}else{static DWORD ll=0;if(now-ll>3000){ll=now;logf("SHV: waiting for ped... t=%ums p=%d",(unsigned)(timeGetTime()-t0),p);}}}continue;}
         // Apply remote-ped movement every tick (smooth)
         if(now-lastNetTick>16){lastNetTick=now;processNetPeds(now);}
         // Drain net-ped command queue (spawn/del/clear) — SHV fiber ONLY, one cmd per tick.
@@ -223,8 +255,8 @@ static void __cdecl shvScriptMain(){
                 if(np&&!np->ped){
                     char tag[64];snprintf(tag,sizeof(tag),"[remote %s]",nc.id);
                     int ped=doSpawnPed(nc.model[0]?nc.model:"s_m_y_cop_01",nc.x,nc.y,nc.z,nc.h,6,true,tag);
-                    if(ped){np->ped=ped;g_shvSpawnCount++;logf("net: spawned remote ped id=%s -> ped=%d",nc.id,ped);sendJson("{\"t\":\"netPedSpawned\",\"id\":\"%s\",\"ped\":%d}",nc.id,ped);}
-                    else logf("net: FAILED to spawn remote ped id=%s",nc.id);
+                    if(ped){np->ped=ped;np->spawnPending=0;g_shvSpawnCount++;logf("net: spawned remote ped id=%s -> ped=%d",nc.id,ped);sendJson("{\"t\":\"netPedSpawned\",\"id\":\"%s\",\"ped\":%d}",nc.id,ped);}
+                    else {np->spawnPending=0;logf("net: FAILED to spawn remote ped id=%s",nc.id);}
                 }
             }else if(nc.op==NQ_DEL){
                 NetPed*np=findNetPed(nc.id);
@@ -275,7 +307,7 @@ static BOOL CALLBACK enumCb(HWND w,LPARAM lp){EnumData*d=(EnumData*)lp;DWORD pid
 static HWND findGtaWnd(){EnumData d={g_pid,NULL};EnumWindows(enumCb,(LPARAM)&d);return d.wnd;}
 static LRESULT CALLBACK wndProc(HWND w,UINT m,WPARAM a,LPARAM b){
     if(m==WM_PAINT){PAINTSTRUCT ps;HDC dc=BeginPaint(w,&ps);HBRUSH kb=CreateSolidBrush(OVERLAY_KEY);RECT rc;GetClientRect(w,&rc);FillRect(dc,&rc,kb);DeleteObject(kb);RECT br={8,8,700,240};HBRUSH b2=CreateSolidBrush(RGB(18,10,2));FillRect(dc,&br,b2);DeleteObject(b2);HPEN pn=CreatePen(PS_SOLID,1,RGB(240,120,40));HGDIOBJ po=SelectObject(dc,pn);MoveToEx(dc,br.left,br.top,NULL);LineTo(dc,br.right,br.top);LineTo(dc,br.right,br.bottom);LineTo(dc,br.left,br.bottom);LineTo(dc,br.left,br.top);SelectObject(dc,po);DeleteObject(pn);SetBkMode(dc,TRANSPARENT);
-    HFONT f1=CreateFontA(22,0,0,0,FW_BOLD,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,"Segoe UI");HFONT f2=CreateFontA(13,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,"Segoe UI");HFONT of=(HFONT)SelectObject(dc,f1);SetTextColor(dc,RGB(240,120,40));char hdr[80];snprintf(hdr,sizeof(hdr),"GTAMP v%s  -  PHASE 5 REMOTE PLAYER SYNC (SHV fiber fix)",HOOK_VER);TextOutA(dc,20,16,hdr,(int)strlen(hdr));SelectObject(dc,f2);char ln[320];SetTextColor(dc,RGB(220,224,232));snprintf(ln,sizeof(ln),"Build: %s   F9=toggle F10=rescan F11=spawn cop",g_ver[0]?g_ver:"?");TextOutA(dc,20,46,ln,(int)strlen(ln));
+    HFONT f1=CreateFontA(22,0,0,0,FW_BOLD,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,"Segoe UI");HFONT f2=CreateFontA(13,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,"Segoe UI");HFONT of=(HFONT)SelectObject(dc,f1);SetTextColor(dc,RGB(240,120,40));char hdr[80];snprintf(hdr,sizeof(hdr),"GTAMP v%s  -  PHASE 6 REMOTE PLAYER LIFECYCLE",HOOK_VER);TextOutA(dc,20,16,hdr,(int)strlen(hdr));SelectObject(dc,f2);char ln[320];SetTextColor(dc,RGB(220,224,232));snprintf(ln,sizeof(ln),"Build: %s   F9=toggle F10=rescan F11=spawn cop",g_ver[0]?g_ver:"?");TextOutA(dc,20,46,ln,(int)strlen(ln));
     if(shv::loaded()){COLORREF c=g_shvReady?RGB(120,220,120):RGB(255,200,80);SetTextColor(dc,c);snprintf(ln,sizeof(ln),"ScriptHookV: OK  script=%s  spawns=%d  remotePeds=%d",g_shvReady?"ready":"starting up",g_shvSpawnCount,g_netPedCount);}else{SetTextColor(dc,RGB(255,160,80));snprintf(ln,sizeof(ln),"ScriptHookV.dll NOT FOUND");}TextOutA(dc,20,64,ln,(int)strlen(ln));
     if(g_shvReady&&g_f.found){SetTextColor(dc,RGB(180,220,255));snprintf(ln,sizeof(ln),"PED @ %p  (+0x90)  mem: %.1f,%.1f,%.1f",(void*)g_f.ped,g_f.pos.x,g_f.pos.y,g_f.pos.z);TextOutA(dc,20,88,ln,(int)strlen(ln));SetTextColor(dc,RGB(180,255,180));snprintf(ln,sizeof(ln),"SHV pos: %.1f,%.1f,%.1f  h=%.1f deg  hp=%d",g_shvLastPedCoords.x,g_shvLastPedCoords.y,g_shvLastPedCoords.z,g_shvLastHeading,g_f.hp);TextOutA(dc,20,108,ln,(int)strlen(ln));SetTextColor(dc,RGB(180,180,180));TextOutA(dc,20,128,g_f.why,(int)strlen(g_f.why));if(g_shvMsg[0]){SetTextColor(dc,RGB(255,220,120));TextOutA(dc,20,148,g_shvMsg,(int)strlen(g_shvMsg));}SetTextColor(dc,RGB(140,200,255));snprintf(ln,sizeof(ln),"Bridge: %s   Remote players online: %d",g_sock!=INVALID_SOCKET?"connected":"waiting",g_netPedCount);TextOutA(dc,20,180,ln,(int)strlen(ln));}else{SetTextColor(dc,RGB(255,200,120));TextOutA(dc,20,88,g_shvReady?"Local ped: scanning memory...":"Waiting for GTA to load...",g_shvReady?33:29);SetTextColor(dc,RGB(180,180,180));TextOutA(dc,20,108,g_f.err,(int)strlen(g_f.err));}
     SetTextColor(dc,RGB(220,180,90));TextOutA(dc,20,200,"F11 or Spawn Cop button = cop 3m in front",42);SelectObject(dc,of);DeleteObject(f1);DeleteObject(f2);EndPaint(w,&ps);return 0;}if(m==WM_DESTROY){g_ov=NULL;return 0;}return DefWindowProcA(w,m,a,b);
@@ -305,7 +337,8 @@ static void handleNetLine(const char*l){int ln=(int)strlen(l);if(ln<5)return;
         sstrcpy(np->name,name,sizeof(np->name));
         sstrcpy(np->model,model,sizeof(np->model));
         np->pos.x=x;np->pos.y=y;np->pos.z=z;np->h=h;np->lastUpdate=timeGetTime();
-        bool needSpawn=(newly||!np->ped)&&g_shvReady;
+        bool needSpawn=(newly||!np->ped)&&!np->spawnPending&&g_shvReady;
+        if(needSpawn)np->spawnPending=1;
         LeaveCriticalSection(&g_npCs);
         if(needSpawn){
             NpCmd c={0};c.op=NQ_SPAWN;sstrcpy(c.id,id,sizeof(c.id));sstrcpy(c.name,name,sizeof(c.name));sstrcpy(c.model,model,sizeof(c.model));
