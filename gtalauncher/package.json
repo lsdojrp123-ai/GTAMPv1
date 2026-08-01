@@ -1,6 +1,6 @@
 {
   "name": "gtamp-launcher",
-  "version": "1.9.9",
+  "version": "2.0.0",
   "description": "GTAMP - GTA Multiplayer Launcher (FiveM-style) \u2014 splash startup, ownership check, connect loading",
   "main": "src/main/main.js",
   "author": "GTAMP",

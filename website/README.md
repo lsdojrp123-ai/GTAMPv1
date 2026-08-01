@@ -65,4 +65,4 @@ The app is plain Node/Express + EJS with a JSON store (`website/data/`). On a se
 PORT=80 GTAMP_SECRET=<random> npm start
 ```
 Use `GTAMP_SECRET` for sessions. For public play put the GTAMP launcher `.exe` at the
-repo root so `/download/GTAMP-Launcher-v1.9.9.exe` works.
+repo root so `/download/GTAMP-Launcher-v2.0.0.exe` works.

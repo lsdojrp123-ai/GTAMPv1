@@ -41,6 +41,14 @@
 - **T chat** in-game (FiveM keybinding); F9 toggles the debug HUD.
 - **Tray/background**: GTAMP keeps running in the tray while you play; quitting GTA returns you to the launcher; `disconnectSession` cleans the session from console/launcher.
 
+## v2.0.0 — the unbrickable connect card: dual-channel telemetry, force-inject, silence becomes an error
+- User report driving this release: *"still says waiting for game window WHILE THE GAME IS OPEN."* With v1.9.9's live feed supposedly rendering heartbeats, a card that shows nothing means one of three silent paths: stdout pipe swallowed Windows-side, the synchronous-shell freeze, or simply an old exe. v2.0.0 closes all three.
+- **File-tailed stage channel.** The injector always wrote its stage/error lines to `%TEMP%\gtamp_injector.log` (GTAMP_LOG); the connect flow now TAILS that file with plain `fs.promises` reads every 1 s and feeds the same lines into the same `onStage`. Stdout from a GUI-subsystem child can be eaten by Windows/AV; a file on disk cannot. Both channels dedupe into the one live feed.
+- **⚡ INJECT NOW override.** The connect card carries a persistent `GAME OPEN? INJECT NOW` button (bottom-left): kills the waiting injector and immediately re-runs it `alreadyRunning` + no window wait + 0.8 s settle — straight into the open GTA5.exe. A generation counter guarantees the killed injector's exit event can never corrupt the new run's outcome. The wait-copy reminds the user the button exists.
+- **Silence ladder.** 12 s with no line on EITHER channel → on-card warning; 30 s → hard fail card "The injector is not running" (SmartScreen/antivirus/Unblock guidance) with the full chronological log auto-copied to clipboard. The worst case is now a *self-reporting* case.
+- **Synchronous-shell hazard removed.** The last `execSync` in the connect path (`ping 127.0.0.1` used as a 2 s pause during Rockstar platform bring-up) is now a plain `await sleep` — spawn/commit pressure could wedge the Electron main thread there, leaving the card frozen mid-flow with the game running behind it.
+- Injector banner 2.0.0 (code otherwise unchanged — its file logging was already complete).
+
 ## v1.9.9 — the card tells you the truth: live injector feed, clipboard diagnostics, fast exact failures
 - The last report pattern ("stuck on waiting for game window" with no further data) proved the remaining problem was **observability**, not the wait logic: whatever the injector was doing, the user and we could not see it. v1.9.9 makes the connect card a diagnostic instrument.
 - **Live feed on the card.** The injector now heartbeats to stdout every 5 s while waiting (`stage:waiting-pid sec=N`, `stage:waiting-window sec=N`, plus raw window-title candidates every ~20 s) and the renderer shows the last 4 raw lines in a mono strip under the status text. A screenshot of the card now *is* the diagnosis.

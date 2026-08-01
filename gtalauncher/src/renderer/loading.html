@@ -45,6 +45,8 @@
   button{cursor:pointer;font-family:"Rubik",sans-serif;font-weight:400;font-size:10.5px;letter-spacing:1px;text-transform:uppercase;
     padding:8px 14px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.22);color:ivory;border-radius:2px}
   button:hover{background:#f40552;border-color:#f40552;box-shadow:0 0 10px rgba(244,5,82,.4)}
+  #forceInject{position:absolute;left:12px;bottom:8px;background:rgba(244,5,82,.08);border:1px solid rgba(244,5,82,.45);color:#f40552;font-size:9.5px;padding:6px 10px;display:none}
+  #forceInject:hover{background:#f40552;color:ivory}
   #cancel{position:absolute;right:12px;bottom:8px;background:none;border:none;color:#565b66;font-size:10px;letter-spacing:1px;text-transform:uppercase;padding:6px;display:none}
   #cancel:hover{color:#f40552;background:none;border:none;box-shadow:none}
 </style>
@@ -62,6 +64,7 @@
   <div id="bar"><i></i></div>
   <div id="error"></div>
   <div id="foot">GTAMP Loading…</div>
+  <button id="forceInject">⚡ GAME OPEN? INJECT NOW</button>
   <button id="cancel">✕ &nbsp;Cancel</button>
 </div>
 <script>
@@ -84,7 +87,9 @@
   var t0 = Date.now(), lastStatus = '', stageLine = '';
   function fmt(ms){ var s = Math.floor(ms/1000); var m = Math.floor(s/60); return (m>0? m+'m ':'') + (s%60) + 's'; }
   var diagEl = document.getElementById('diag');
-  if (MODE === 'connect') { timerEl.style.display = 'block'; stageEl.style.display = 'block'; diagEl.style.display = 'block'; }
+  var forceBtn = document.getElementById('forceInject');
+  if (MODE === 'connect') { timerEl.style.display = 'block'; stageEl.style.display = 'block'; diagEl.style.display = 'block'; forceBtn.style.display = 'block'; }
+  forceBtn.addEventListener('click', function(){ window.gtamp.loading.action('forceInject'); });
   setInterval(function(){
     if (MODE !== 'connect' || errEl.style.display === 'flex') return;
     timerEl.textContent = 'elapsed ' + fmt(Date.now() - t0) + (lastStatus ? ' — this step ' + fmt(Date.now() - lastStatus.t) : '');
@@ -133,6 +138,7 @@
     window.gtamp.loading.onError(function(e){
       stepsEl.style.display = 'none';
       barEl.style.display = 'none';
+      forceBtn.style.display = 'none';
       errEl.style.display = 'flex';
       errEl.innerHTML = '';
       var h = document.createElement('h2'); h.textContent = e.title || 'Something went wrong';

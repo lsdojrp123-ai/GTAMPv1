@@ -819,7 +819,7 @@ function verifyGtaOwnership(dir) {
 }
 
 // ---------- Loading window: startup splash + server connect (v1.7.0) ----------
-const LAUNCHER_VER = '1.9.9';
+const LAUNCHER_VER = '2.0.0';
 function openLoading(mode, opts = {}) {
   closeLoading();
   loadingWin = new BrowserWindow({
@@ -1079,11 +1079,12 @@ async function pickGtaFolderDialog() {
 // Actions from loading.html buttons (startup errors + connect cancel)
 ipcMain.on('loading:action', (_e, act) => {
   const id = typeof act === 'string' ? act : (act && act.id);
-  if (connectCtl && ['cancel', 'retry', 'retryInject', 'pickFolder', 'quit', 'relaunchAdmin'].includes(id)) {
+  if (connectCtl && ['cancel', 'retry', 'retryInject', 'pickFolder', 'quit', 'relaunchAdmin', 'forceInject'].includes(id)) {
     (async () => {
       if (id === 'cancel') return connectCtl.cancel();
       if (id === 'quit') return app.quit();
       if (id === 'relaunchAdmin') return relaunchElevated();
+      if (id === 'forceInject') { try { connectCtl.event('forceInjectReq'); } catch {} return; }
       if (id === 'pickFolder') {
         const p = await pickGtaFolderDialog();
         if (p) { config.gtaPath = p; saveConfig(config); connectCtl.retry(); }
@@ -1388,6 +1389,7 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
     async cancel(silent) {
       ctl.cancelled = true;
       stopGtaExitWatch();
+      try { if (ctl._tailTimer) clearInterval(ctl._tailTimer); ctl._tailTimer = null; } catch {}
       try { if (injectorProc && !injectorProc.killed) injectorProc.kill(); } catch {}
       if (!silent) { try { discordRpc.setInLauncher(); } catch {} }
       try { hookBroadcast({ t: 'joinEnd', ok: 0 }); } catch {}
@@ -1511,7 +1513,8 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
   try {
     if (launch.ensurePlatform) {
       ensurePlatformRunning(launch.ensurePlatform);
-      try { require('child_process').execSync('ping 127.0.0.1 -n 3 >nul', { windowsHide: true }); } catch {}
+      await sleep(2000); // v2.0.0 — was execSync('ping'): a synchronous shell spawn can freeze the
+      // entire main process on commit-pressured machines (card frozen forever, game open behind it)
     }
   } catch {}
   if (ctl.cancelled) return;
@@ -1577,7 +1580,7 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
     diag('injector: ' + line); // v1.9.9 — raw feed straight onto the card
     if (line.startsWith('stage:waiting-pid')) {
       const m = line.match(/sec=(\d+)/);
-      loadingStatus('WAITING FOR GAME WINDOW', 'Waiting for GTA5.exe… (' + (m ? m[1] : '0') + 's) — if Rockstar/Steam is asking you something behind this window, answer it');
+      loadingStatus('WAITING FOR GAME WINDOW', 'Waiting for GTA5.exe… (' + (m ? m[1] : '0') + 's) — already open behind this window? press ⚡ INJECT NOW (bottom-left)');
     } else if (line.startsWith('stage:waiting-window-titles')) {
       // raw window titles the injector can see — proves what Windows shows us (ENB/hidden/elevated diagnosis)
     } else if (line.startsWith('stage:waiting-window')) {
@@ -1615,35 +1618,96 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
       if (!injectorOutcome) injectorOutcome = { ok: false, code: line.slice(6) };
     }
   };
-  writeLaunchDiag(['v1.9.9 native injector owns process+window wait (heartbeats every 5s), alreadyRunning=' + reusedGame + ', pidWaitMs=' + pidWaitMs + ', windowCap=' + windowCap]);
-  diag('launch: spawning injector — watch this feed: every 5s a heartbeat MUST appear below');
-  const injRes = runInjector({ waitPid: true, pidTimeoutMs: pidWaitMs, waitWindow: true, alreadyRunning: reusedGame, settleMs: Math.max(1000, parseInt(process.env.GTAMP_SETTLE_MS || '6000', 10) || 6000), timeoutMs: windowCap }, onStage);
+  writeLaunchDiag(['v2.0.0 native injector + file-tailed stage channel, alreadyRunning=' + reusedGame + ', pidWaitMs=' + pidWaitMs + ', windowCap=' + windowCap]);
+  diag('launch: v' + LAUNCHER_VER + ' — injector feed below; heartbeat every 5s while waiting');
+
+  // v2.0.0 — generation guard: an old injector's dying lines must never set the outcome for a new one
+  let activeGen = 1;
+  const stageHandler = (gen) => (line) => { if (gen === activeGen) onStage(line); };
+
+  // v2.0.0 — FILE CHANNEL. The injector writes every stage:/error: line to %TEMP%\gtamp_injector.log
+  // too (GTAMP_LOG). Stdout pipes from GUI-subsystem children can be silently swallowed on this
+  // machine; a plain fs file read cannot. Tail the log and feed the SAME lines into onStage.
+  const injLogPath = path.join(os.tmpdir(), 'gtamp_injector.log');
+  try { fs.writeFileSync(injLogPath, ''); } catch {}
+  let tailOff = 0; const tailSeen = new Map();
+  const tailOnce = async () => {
+    try {
+      const st = await fs.promises.stat(injLogPath).catch(() => null);
+      if (!st || st.size === tailOff) return;
+      if (st.size < tailOff) tailOff = 0;
+      const fh = await fs.promises.open(injLogPath, 'r');
+      let txt = '';
+      try {
+        const buf = Buffer.alloc(Math.min(st.size - tailOff, 1 << 20));
+        const rd = await fh.read(buf, 0, buf.length, tailOff);
+        tailOff += rd.bytesRead;
+        txt = buf.slice(0, rd.bytesRead).toString('utf8');
+      } finally { try { await fh.close(); } catch {} }
+      for (const rawLine of txt.split(/\r?\n/)) {
+        const m = rawLine.match(/^\[[^\]]*\]\s*(.+?)\s*$/); // "[14:22:31.452] stage:…"
+        const l = m ? m[1] : '';
+        if (!l || !(l.startsWith('stage:') || l.startsWith('error:'))) continue;
+        if (Date.now() - (tailSeen.get(l) || 0) < 60000) continue; // dedupe vs stdout channel
+        tailSeen.set(l, Date.now());
+        try { onStage(l); } catch {}
+      }
+    } catch {}
+  };
+  const tailTimer = setInterval(tailOnce, 1000);
+  ctl._tailTimer = tailTimer;
+
+  const injRes = runInjector({ waitPid: true, pidTimeoutMs: pidWaitMs, waitWindow: true, alreadyRunning: reusedGame, settleMs: Math.max(1000, parseInt(process.env.GTAMP_SETTLE_MS || '6000', 10) || 6000), timeoutMs: windowCap }, stageHandler(activeGen));
   if (!injRes.ok) { fail(9, 'Injection failed', injRes.error || 'unknown'); return; }
 
   // STEP 8 — wait until the injector reports injected / errored. Budget covers the injector's
   // own process wait + window cap + settle with headroom; hookHello shortcuts success.
   {
     const t2 = Date.now();
+    let forceUsed = false;
     const outcomeBudget = (reusedGame ? windowCap : pidWaitMs + windowCap) + 60000;
     while (!injectorOutcome && !ctl.events['hookHello'] && Date.now() - t2 < outcomeBudget) {
       if (ctl.cancelled) return;
-      // v1.9.9 — the injector heartbeats every 5s while it waits; 25s of silence = it never
-      // started (antivirus / SmartScreen swallowed it; exit code will still arrive, so warn only)
-      if (!silenceWarned && Date.now() - lastInjectorLine > 25000) {
+      // v2.0.0 — user override: "the game IS open, stop waiting" → kill current injector, force
+      // immediate inject into the running GTA5.exe (no window wait, 0.8s settle)
+      if (!forceUsed && ctl.events['forceInjectReq']) {
+        forceUsed = true;
+        delete ctl.events['forceInjectReq'];
+        diag('>>> user pressed INJECT NOW — skipping all waits, injecting into the open game');
+        writeLaunchDiag(['forceInject pressed by user']);
+        activeGen++; // old injector's exit/stdout now irrelevant
+        try { if (injectorProc && !injectorProc.killed) injectorProc.kill(); } catch {}
+        injectorOutcome = null; procLineShown = true;
+        loadingStatus('INJECTING NOW', 'You said the game is open — going straight in…');
+        const fr = runInjector({ waitPid: true, pidTimeoutMs: 25000, waitWindow: false, alreadyRunning: true, settleMs: 800, timeoutMs: 20000 }, stageHandler(activeGen));
+        if (!fr.ok) { fail(9, 'Injection failed', fr.error || 'unknown'); return; }
+        lastInjectorLine = Date.now();
+      }
+      // v2.0.0 — silence ladder. The injector heartbeats every 5s on TWO channels (stdout + log
+      // file tail). 12s silence: on-card warning. 30s silence: hard card with clipboard diagnostics —
+      // a silent wedge is itself the bug report; never sit on a dead card.
+      if (!silenceWarned && Date.now() - lastInjectorLine > 12000) {
         silenceWarned = true;
-        diag('WARNING: injector silent for 25s — gtamp_injector.exe may be blocked by security software');
-        loadingStatus('WAITING FOR GAME WINDOW', 'The injector went silent — check antivirus/SmartScreen for gtamp_injector.exe');
+        diag('WARNING: injector silent for 12s on BOTH channels — gtamp_injector.exe may be blocked');
+        loadingStatus('WAITING FOR GAME WINDOW', 'The injector went silent — if this hits 30s you will get an exact error card');
+      }
+      if (Date.now() - lastInjectorLine > 30000) {
+        fail(7, 'The injector is not running',
+          'gtamp_injector.exe produced no output for 30 seconds on either channel (stdout + its log file) — so Windows SmartScreen or your antivirus is blocking it, or the whole GTAMP exe is still marked as a blocked download.\n\n1) Windows Security > Virus & threat protection > Protection history — if gtamp is listed, choose Allow.\n2) Right-click this launcher exe > Properties > tick Unblock > OK.\n3) Add the launcher folder to antivirus Exclusions.\nThen press Retry.',
+          [{ id: 'retry', label: 'Retry' }, { id: 'cancel', label: 'Cancel' }]);
+        return;
       }
       if (!procLineShown && Date.now() - lastUiTick >= 2000) { // pure-timer countdown, no shell
         lastUiTick = Date.now();
         const left = Math.max(0, Math.ceil((pidWaitMs - (Date.now() - t0)) / 1000));
-        loadingStatus('WAITING FOR GAME WINDOW', 'Waiting for GTA5.exe… up to ' + left + 's — if Rockstar/Steam is asking you something behind this window, answer it');
+        loadingStatus('WAITING FOR GAME WINDOW', 'Waiting for GTA5.exe… up to ' + left + 's — answer any Rockstar/Steam prompt behind this window. GAME ALREADY OPEN? press ⚡ INJECT NOW (bottom-left)');
       }
       await sleep(400);
     }
     // if the HOOK reported in, the DLL is in no matter what stdout said
     if (!injectorOutcome && ctl.events['hookHello']) injectorOutcome = { ok: true, via: 'hookHello' };
   }
+  try { clearInterval(tailTimer); ctl._tailTimer = null; } catch {}
   if (ctl.cancelled) return;
   if (!injectorOutcome || !injectorOutcome.ok) {
     const code = injectorOutcome && injectorOutcome.code;

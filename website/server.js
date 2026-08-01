@@ -80,8 +80,8 @@ app.post('/api/servers/report', (req, res) => {
   res.json({ ok: true, id: srv.id });
 });
 
-// v1.9.9 — component update channel consumed by the launcher's "Updating components" stage
-const LAUNCHER_VERSION = '1.9.9';
+// v2.0.0 — component update channel consumed by the launcher's "Updating components" stage
+const LAUNCHER_VERSION = '2.0.0';
 app.get('/api/launcher/version', (req, res) => {
   res.json({ version: LAUNCHER_VERSION, url: '/download/GTAMP-Launcher-v' + LAUNCHER_VERSION + '.exe' });
 });
