@@ -819,7 +819,7 @@ function verifyGtaOwnership(dir) {
 }
 
 // ---------- Loading window: startup splash + server connect (v1.7.0) ----------
-const LAUNCHER_VER = '1.9.1';
+const LAUNCHER_VER = '1.9.2';
 function openLoading(mode, opts = {}) {
   closeLoading();
   loadingWin = new BrowserWindow({
@@ -966,10 +966,19 @@ async function runStartup() {
   try {
     const { FXServer } = require(path.join(__dirname, '..', 'fxserver', 'index.js'));
     const fx = new FXServer({ port: 22005, platformPort: 22003, name: 'GTAMP Official (Local)' });
-    fxServerInfo = await fx.start();
+    // v1.9.2 — NEVER let the splash hang here: 12s cap, then continue degraded.
+    // (Hang seen on machines where a second instance / zombie process held the ports.)
+    const fxPromise = fx.start();
+    fxPromise.catch(() => {}); // late rejection must never become an unhandledRejection
+    fxServerInfo = await Promise.race([
+      fxPromise,
+      new Promise((_, rej) => setTimeout(() => rej(new Error('FXServer start timeout (12s)')), 12000))
+    ]);
     console.log('[Main] FXServer up:', fxServerInfo);
+    writeLaunchDiag(['FXServer up: ' + JSON.stringify(fxServerInfo).slice(0, 300)]);
   } catch (e) {
     console.error('[Main] FXServer failed:', e);
+    writeLaunchDiag(['FXServer start degraded: ' + e.message]);
     fxServerInfo = { gamePort: 22005, platformPort: 22003, resourcePort: 22010, platformUrl: 'http://127.0.0.1:22003', error: e.message };
   }
   // Discord presence (non-blocking)
@@ -1485,6 +1494,20 @@ function createWindow() {
 
 // ---------- Lifecycle ----------
 // v1.7.0: splash screen FIRST (FiveM-style), main window only after startup done.
+// v1.9.2 — FiveM parity: ONE client process only. A duplicate instance can't bind the MP
+// ports and would sit forever at "Starting multiplayer services" (the reported hang).
+// Second instance → focus the first one and exit silently.
+const singleInstanceLock = app.requestSingleInstanceLock();
+if (!singleInstanceLock) {
+  app.exit(0);
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show(); mainWindow.focus();
+    }
+  });
+}
 app.whenReady().then(() => { runStartup(); });
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0 && startupDone) createWindow(); });
 // v1.7.1 hotfix: the loading/connect window is TRANSIENT. When it closes it briefly

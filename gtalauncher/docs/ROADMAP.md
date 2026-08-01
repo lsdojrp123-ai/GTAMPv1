@@ -41,6 +41,10 @@
 - **T chat** in-game (FiveM keybinding); F9 toggles the debug HUD.
 - **Tray/background**: GTAMP keeps running in the tray while you play; quitting GTA returns you to the launcher; `disconnectSession` cleans the session from console/launcher.
 
+## v1.9.2 — hotfix: startup hang + in-game "Unrecoverable fault"
+- **"Starting multiplayer services" hang**: FXServer UDP bind could await forever (ports held by a duplicate/zombie GTAMP instance). Now: bind error resolves degraded, splash has a hard 12s race, and the app enforces a **single-instance lock** (FiveM runs exactly one client process) — a second GTAMP just focuses the first.
+- **In-game "Unrecoverable fault"**: two v1.9.0 code paths could fault RAGE — (1) `SHUTDOWN_LOADING_SCREEN` called every 250ms through a story-mode load, now once/sec ×10 max; (2) D3D/DXGI pinning loaded DLLs **inside DllMain's loader lock** — moved to the SHV worker thread, exactly the constraint FiveM's `Main.cpp` preloads respect.
+
 ## v1.9.1 — hotfix: never force-kill GTA/Rockstar processes
 - v1.9.0's prep step `taskkill /F`'d GTA5.exe + the Rockstar launcher → Rockstar reported "Grand Theft Auto V Legacy exited unexpectedly" on the next launch. FiveM never force-kills the game; its `-switchcl` flow **reuses** a running instance. We now do the same: Connect with GTA already running switches into the GTAMP session without relaunch, force-kill is behind an explicit `GTAMP_FORCE_KILL=1` escape hatch, and the window-wait fails fast ("GTA V exited unexpectedly" card with OK/Retry guidance) if the game dies mid-boot instead of sitting 4 minutes silent.
 

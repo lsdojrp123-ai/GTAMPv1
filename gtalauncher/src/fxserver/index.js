@@ -536,6 +536,12 @@ class FXServer {
 
     // Game UDP
     await new Promise((resolve) => {
+      // v1.9.2 — a bind ERROR (port held by a zombie GTAMP instance) must resolve, not hang forever
+      this.socket.once('error', (e) => {
+        this.socketError = e.message;
+        console.log('[FXServer] UDP bind failed on ' + this.gamePort + ': ' + e.message + ' (degraded — LAN play may be unavailable)');
+        resolve();
+      });
       this.socket.once('listening', () => {
         const a = this.socket.address();
         this.actualPort = a.port;

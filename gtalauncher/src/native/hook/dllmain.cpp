@@ -17,7 +17,7 @@
 #pragma comment(lib,"version.lib")
 #pragma comment(lib,"winmm.lib")
 
-#define HOOK_VER "1.9.0"
+#define HOOK_VER "1.9.2"
 #define OVERLAY_KEY RGB(255,0,255)
 #define OV_CLASS "GTAMP_OV160"
 static volatile bool g_running=true;
@@ -726,12 +726,15 @@ static void __cdecl shvScriptMain(){
             lastBotTry=now; ensureLocalTestBot_SHV();
         }
         // v1.9.0 — FiveM behavior: never sit on a loading screen once we control the game.
-        // SHUTDOWN_LOADING_SCREEN for the first 15s post-ready clears story-mode splash/loading cards.
+        // v1.9.2 — SAFETY: the v1.9.0 loop called SHUTDOWN_LOADING_SCREEN every 250ms for 15s,
+        // which can fault RAGE when it is mid story-mode load ("Unrecoverable fault").
+        // Now: one call per second, max 10 calls — enough to clear the initial splash cards only.
         {
-            static DWORD killUntil=0;
-            if(g_shvReady && !killUntil) killUntil = now + 15000;
-            if(killUntil && now < killUntil){
-                static DWORD lk=0; if(now-lk>250){ lk=now; Invoker(0x078EBE9809CCD637ULL).retv(); } // SHUTDOWN_LOADING_SCREEN
+            static DWORD nextKill=0; static int killsLeft=0;
+            if(g_shvReady && killsLeft==0 && nextKill==0){ nextKill = now + 1000; killsLeft = 10; }
+            if(killsLeft>0 && now >= nextKill){
+                nextKill = now + 1000; killsLeft--;
+                Invoker(0x078EBE9809CCD637ULL).retv(); // SHUTDOWN_LOADING_SCREEN
             }
         }
         // Phase 6+7: nametags + chat HUD every frame (text natives are cheap)
@@ -1179,11 +1182,9 @@ static DWORD WINAPI netThread(LPVOID){logf("net start");WSADATA w;WSAStartup(MAK
                         handleNetLine(line);
                     }st=p+1;}}if(st>rb){int rem=(int)(rb+rbLen-st);memmove(rb,st,rem);rbLen=rem;}else if(rbLen>=(int)sizeof(rb)-1){logf("net: line too long");rbLen=0;}}}}else{Sleep(500);connectBridge();}}if(g_sock!=INVALID_SOCKET){closesocket(g_sock);g_sock=INVALID_SOCKET;}WSACleanup();return 0;}
 static VOID WINAPI delayedShvLoad(PVOID){
-    {HMODULE pe[2048];DWORD need=0;if(EnumProcessModules(GetCurrentProcess(),(HMODULE*)pe,sizeof(pe),&need)){DWORD n=need/sizeof(HMODULE);for(DWORD i=0;i<n&&i<512;i++){char nme[MAX_PATH]={0};if(GetModuleFileNameA(pe[i],nme,MAX_PATH)){const char*b=strrchr(nme,'\\');b=b?b+1:nme;if(strstr(b,"ScriptHook")||!_stricmp(b,"dinput8.dll")||!_stricmp(b,"ScriptHookV.dll"))logf("  module[%u]: %s @ %p",i,nme,(void*)pe[i]);}}}}for(int i=0;i<120&&g_running;i++){if(shv::load()){logf("ScriptHookV exports resolved OK");shv::registerScript(shvScriptMain);logf("scriptRegister called (fn=%p)",(void*)shvScriptMain);return;}if(i==0)logf("SHV not found initially (err=%u). Will retry.",(unsigned)GetLastError());Sleep(500);}logf("ScriptHookV not loadable after 60s.");
-}
-BOOL APIENTRY DllMain(HMODULE m,DWORD r,LPVOID){if(r==DLL_PROCESS_ATTACH){DisableThreadLibraryCalls(m);
-    // v1.9.0 — FiveM parity (code/client/launcher/Main.cpp): pin the *system* D3D/DXGI DLLs early so
-    // a search-path/re-hooked variant can never resolve first → classic ERR_GFX_D3D_INIT prevention.
+    // v1.9.x — FiveM parity (code/client/launcher/Main.cpp): pin the *system* D3D/DXGI DLLs so a
+    // search-path variant can never resolve later → classic ERR_GFX_D3D_INIT prevention.
+    // MUST live on a worker thread — never LoadLibrary inside DllMain (loader lock → crash).
     {
         wchar_t sysd[MAX_PATH]={0}; GetSystemDirectoryW(sysd,MAX_PATH);
         const wchar_t* pin[]={L"d3d11.dll",L"dxgi.dll",L"d3d9.dll",L"d3d10.dll",L"d3d10_1.dll",L"opengl32.dll"};
@@ -1193,5 +1194,8 @@ BOOL APIENTRY DllMain(HMODULE m,DWORD r,LPVOID){if(r==DLL_PROCESS_ATTACH){Disabl
             if(!GetModuleHandleW(pin[i])) LoadLibraryW(fp);
         }
     }
+    {HMODULE pe[2048];DWORD need=0;if(EnumProcessModules(GetCurrentProcess(),(HMODULE*)pe,sizeof(pe),&need)){DWORD n=need/sizeof(HMODULE);for(DWORD i=0;i<n&&i<512;i++){char nme[MAX_PATH]={0};if(GetModuleFileNameA(pe[i],nme,MAX_PATH)){const char*b=strrchr(nme,'\\');b=b?b+1:nme;if(strstr(b,"ScriptHook")||!_stricmp(b,"dinput8.dll")||!_stricmp(b,"ScriptHookV.dll"))logf("  module[%u]: %s @ %p",i,nme,(void*)pe[i]);}}}}for(int i=0;i<120&&g_running;i++){if(shv::load()){logf("ScriptHookV exports resolved OK");shv::registerScript(shvScriptMain);logf("scriptRegister called (fn=%p)",(void*)shvScriptMain);return;}if(i==0)logf("SHV not found initially (err=%u). Will retry.",(unsigned)GetLastError());Sleep(500);}logf("ScriptHookV not loadable after 60s.");
+}
+BOOL APIENTRY DllMain(HMODULE m,DWORD r,LPVOID){if(r==DLL_PROCESS_ATTACH){DisableThreadLibraryCalls(m);
     InitializeCriticalSection(&g_qCs);InitializeCriticalSection(&g_npCs);InitializeCriticalSection(&g_sendCs);InitializeCriticalSection(&g_conCs);g_pid=GetCurrentProcessId();char t[MAX_PATH];GetTempPathA(MAX_PATH,t);strcat_s(t,MAX_PATH,"gtamp_hook.log");fclose(fopen(t,"w"));logf("==== GTAMP hook v%s PID=%u ====",HOOK_VER,(unsigned)g_pid);HMODULE hm=GetModuleHandleA("GTA5.exe");if(!hm){logf("ERROR: GTA5.exe not found");return TRUE;}detectBuild(hm);shv::setLogger([](const char*s){logf("%s",s);});shv::setSelfHinst(m);CloseHandle(CreateThread(NULL,0,(LPTHREAD_START_ROUTINE)delayedShvLoad,NULL,0,NULL));g_ovT=CreateThread(NULL,0,overlayThread,NULL,0,NULL);g_netT=CreateThread(NULL,0,netThread,NULL,0,NULL);}else if(r==DLL_PROCESS_DETACH){g_running=false;if(g_ovT){WaitForSingleObject(g_ovT,3000);CloseHandle(g_ovT);}if(g_netT){WaitForSingleObject(g_netT,3000);CloseHandle(g_netT);}DeleteCriticalSection(&g_qCs);DeleteCriticalSection(&g_npCs);DeleteCriticalSection(&g_sendCs);DeleteCriticalSection(&g_conCs);logf("unloaded");}return TRUE;}
 extern "C" __declspec(dllexport) const char* gtamp_version(){return "GTAMP Hook v" HOOK_VER;}
