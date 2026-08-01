@@ -318,3 +318,84 @@ footer .copyright{text-align:center;margin-top:2em;margin-bottom:1.5em;color:var
 .docs-content .sectionTitle{font-size:var(--fs2);font-weight:500;margin-bottom:12px;color:#fff}
 .docs-content p{color:var(--color-text-a75);margin-bottom:12px}
 @media(max-width:900px){.docs-layout{grid-template-columns:1fr}.docs-nav{border-right:0;border-bottom:1px solid var(--color-text-a10)}}
+
+/* ==========================================================================
+   PRECISION PASS — exact measured geometry from the reference stylesheet
+   ========================================================================== */
+
+/* hero: 7rem top / 13rem bottom, lead in Montserrat 300 2rem */
+section.hero{padding:var(--q7) 24px var(--q13) 24px}
+section.hero .lead p{font-size:var(--fs5);font-family:var(--f2);font-weight:300;line-height:1.25}
+section.hero .lead h1{font-weight:700;font-size:30px;line-height:110%;margin:0}
+
+/* download button: Rubik 300 · 24px · pad 16/32 · 2px border · animated texture */
+section.hero .cta .btn-accent#dl{
+  padding:var(--q) var(--q2);font-weight:300;font-family:var(--f1);font-size:var(--fs3);
+  background-color:var(--color-accent-1-a10);
+  background-image:repeating-linear-gradient(45deg,rgba(244,5,82,.10) 0 16px,transparent 16px 32px);
+  background-size:200% 200%;animation:bganim 40s linear infinite;
+  border:2px solid var(--color-accent-1);
+  box-shadow:0 0 10px 0 var(--color-accent-1-a50);
+  backdrop-filter:blur(var(--blur-radius));
+  transition:background .2s ease;text-align:center;line-height:1.2;
+}
+section.hero .cta .btn-accent#dl:hover{background-color:var(--color-accent-1-s90)}
+section.hero .cta .btn-accent#dl small{font-size:var(--fs08);font-weight:300;opacity:.8}
+@keyframes bganim{0%{background-position:0 0}100%{background-position:1000px 0}}
+section.hero .cta .btn-ghost{padding:var(--qh) var(--q);font-size:var(--fs08);letter-spacing:.5px;text-transform:uppercase}
+
+/* feature articles: margin 16 + padding 16, subtle texture, h2 Montserrat mb16 */
+.features.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:0;margin:0 calc(var(--q) * -1)}
+.features .card{margin:var(--q);padding:var(--q);
+  background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.015) 0 10px,transparent 10px 20px);
+  box-shadow:0 -2px 0 var(--fc) inset,0 2px 0 var(--fc) inset;background-color:var(--fb);
+  backdrop-filter:blur(var(--blur-radius));transition:transform .2s ease}
+.features .card:hover{transform:translateY(calc(var(--qh) * -1))}
+.features .card h3{font-size:var(--fs2);margin:0 0 var(--q) 0;font-weight:500}
+.features .card.f1{--fc:rgba(7,186,174,.35);--fb:rgba(7,186,174,.05)}
+.features .card.f2{--fc:rgba(7,133,189,.35);--fb:rgba(7,133,189,.05)}
+.features .card.f3{--fc:rgba(162,186,11,.35);--fb:rgba(162,186,11,.05)}
+.features .card.f4{--fc:rgba(185,8,94,.35);--fb:rgba(185,8,94,.05)}
+.features .fi{font-size:34px;color:var(--fc)}
+.preamb{padding-bottom:var(--q);color:var(--color-text-a75);font-size:var(--fs2)}
+
+/* full-bleed bands */
+.band{width:100%}
+.band-gold{background-color:rgba(189,178,121,.08)}
+.band-teal{background-color:var(--color-accent-2-a10)}
+.band .inner{max-width:1100px;margin:0 auto;padding:var(--q3) 24px}
+.goldline{color:var(--color-enhanced,#bdb279)}
+.band .cta-inline{padding:var(--q2);font-size:var(--fs3);background:var(--color-accent-1-a10);display:inline-block;margin-top:var(--q)}
+
+/* requirements: h1 mb 40, bold h2, secondary desc lines */
+.reqs h1{margin-bottom:40px}
+.reqs .req h3{font-weight:700;color:var(--color-text)}
+.reqs .version-desc{color:var(--color-text-a75);font-size:var(--fs08);margin-bottom:20px}
+.reqs .windows-version{color:var(--color-text-a50);font-weight:700;margin:16px 0 8px}
+.reqs-grid{gap:var(--q3)}
+
+/* faq: h3 anchors */
+.faq h3{margin-top:var(--q2);margin-bottom:var(--qh);font-weight:500;font-size:var(--fs2)}
+.faq h3 a{color:var(--color-text-a50)}
+.faq h3 a:hover{color:var(--color-text)}
+.faq p{color:var(--color-text-a75);max-width:760px;line-height:1.6}
+
+/* dev cards inside teal band */
+.devgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:var(--q2)}
+.devgrid h3{font-weight:500;margin-bottom:var(--q)}
+.devgrid p{color:var(--color-text-a75);margin-bottom:var(--q)}
+.devgrid .lang{display:block;padding:var(--q);margin-bottom:var(--q);background:rgba(255,255,255,.04);color:var(--color-text)}
+.devgrid .lang:hover{background:rgba(255,255,255,.08)}
+.devgrid .lang b{display:block;font-weight:500;color:#fff;margin-bottom:4px}
+.devgrid .lang-lua{box-shadow:3px 0 0 #0785bd inset}
+.devgrid .lang-js{box-shadow:3px 0 0 #a2ba0b inset}
+.devgrid .lang-cs{box-shadow:3px 0 0 #8b6cff inset}
+
+/* server list exact geometry: 56px+ rows · 6px radius · 8px gaps */
+.sv-list{display:flex;flex-direction:column;gap:8px}
+.sv-row{min-height:64px;padding:12px 16px;margin-bottom:0;border-radius:6px}
+.sv-icon{width:48px;height:48px;border-radius:6px}
+.sv-head h1{font-weight:300;letter-spacing:2px}
+
+/* inputs: their control-height 48px feel */
+input[type=text],input[type=password],input[type=email],input[type=number],textarea,select{min-height:44px}
