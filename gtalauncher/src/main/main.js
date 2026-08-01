@@ -819,7 +819,7 @@ function verifyGtaOwnership(dir) {
 }
 
 // ---------- Loading window: startup splash + server connect (v1.7.0) ----------
-const LAUNCHER_VER = '1.9.4';
+const LAUNCHER_VER = '1.9.5';
 function openLoading(mode, opts = {}) {
   closeLoading();
   loadingWin = new BrowserWindow({
@@ -1292,7 +1292,7 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
   const upd = await checkComponentUpdates();
   if (ctl.cancelled) return;
   if (upd && upd.version && upd.version !== LAUNCHER_VER) {
-    setStep(4, 'done', 'update available: v' + upd.version + ' — you are on v' + LAUNCHER_VER);
+    setStep(4, 'done', 'UPDATE v' + upd.version + ' available — you are on v' + LAUNCHER_VER + '. Get it from the GTAMP website Downloads page (old builds do not inject correctly).');
     writeLaunchDiag(['components: update available v' + upd.version]);
   } else {
     setStep(4, 'done', 'v' + LAUNCHER_VER + ' up to date');
@@ -1361,13 +1361,22 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
   let injectorOutcome = null;
   let stage8Armed = false;
   const onStage = (line) => {
-    if (line.startsWith('stage:window-found')) {
+    if (line.startsWith('stage:process-found')) {
+      const m = line.match(/pid=(\d+)/);
+      setStep(7, 'active', 'Game process found' + (m ? ' (pid ' + m[1] + ')' : '') + ' — waiting for the game window…');
+    } else if (line.startsWith('stage:window-found')) {
       ctl.event('windowFound');
       setStep(7, 'done', 'game window up (D3D ready)');
       setStep(8, 'active', 'Letting the game render its first frames…');
       stage8Armed = true;
+    } else if (line.startsWith('stage:window-timeout')) {
+      // v1.9.5 — window never matched (odd title / store wrapper); NOT fatal, injector proceeds blind
+      ctl.event('windowFound');
+      setStep(7, 'done', 'window not detected — game is running, injecting anyway');
+      setStep(8, 'active', 'Settling before injection…');
+      stage8Armed = true;
     } else if (line.startsWith('stage:settling')) {
-      if (!stage8Armed) { setStep(7, 'done'); }
+      if (!stage8Armed) { setStep(7, 'done'); setStep(8, 'active', 'Settling before injection…'); }
       loadingStatus('PREPARING INJECTION', 'The game is rendering normally — injecting in a few seconds…');
     } else if (line === 'stage:injected') {
       injectorOutcome = { ok: true };
@@ -1376,8 +1385,8 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
       injectorOutcome = { ok: false, code: line.slice(6) };
     }
   };
-  writeLaunchDiag(['game process found — native injector takes over (window wait → settle → inject)']);
-  const injRes = runInjector({ waitWindow: true, settleMs: Math.max(1000, parseInt(process.env.GTAMP_SETTLE_MS || '6000', 10) || 6000), timeoutMs: 240000 }, onStage);
+  writeLaunchDiag(['game process found — native injector takes over (window wait → settle → inject), alreadyRunning=' + reusedGame]);
+  const injRes = runInjector({ waitWindow: true, alreadyRunning: reusedGame, settleMs: Math.max(1000, parseInt(process.env.GTAMP_SETTLE_MS || '6000', 10) || 6000), timeoutMs: 240000 }, onStage);
   if (!injRes.ok) { fail(9, 'Injection failed', injRes.error || 'unknown'); return; }
 
   // STEP 8 — wait until the injector reports injected / errored (its own timeout is 240s)
@@ -1735,7 +1744,10 @@ function runInjector(opts, onStage) {
       args.push('--wait-window');
       args.push('--settle-ms', String(opts.settleMs || 6000));
     }
-    injectorProc = spawn(injPath, args, { detached:false, stdio: ['ignore', onStage ? 'pipe' : 'ignore', 'pipe'], windowsHide:true });
+    if (opts.alreadyRunning) args.push('--already-running'); // v1.9.5 — reused instance: skip window gate entirely
+    // v1.9.5 — injector ALWAYS writes a native log (window candidates etc.) for post-mortems
+    const injEnv = Object.assign({}, process.env, { GTAMP_LOG: require('path').join(require('os').tmpdir(), 'gtamp_injector.log') });
+    injectorProc = spawn(injPath, args, { detached:false, stdio: ['ignore', onStage ? 'pipe' : 'ignore', 'pipe'], windowsHide:true, env: injEnv });
     if (onStage && injectorProc.stdout) {
       let buf = '';
       injectorProc.stdout.setEncoding('utf16le'); // stage() writes wide chars

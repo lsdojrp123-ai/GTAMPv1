@@ -31,7 +31,7 @@ const sampleAssets = assets.length ? assets : [
   { id: 3, title: 'City Hall Map', desc: 'Detailed interior map.', price: 8.99, cat: 'map', downloads: 120, ownerId: 3 }
 ];
 const samplePosts = posts.length ? posts : [
-  { id: 1, cat: 'announcements', title: 'GTAMP v1.9.4 released', body: 'In-game connect panel, F8 console, T chat — the full FiveM-style join flow is live.', uid: 1, at: Date.now() },
+  { id: 1, cat: 'announcements', title: 'GTAMP v1.9.5 released', body: 'In-game connect panel, F8 console, T chat — the full FiveM-style join flow is live.', uid: 1, at: Date.now() },
   { id: 2, cat: 'client-support', title: 'ERR_NO_LAUNCHER fix', body: 'Make sure you launch through the platform you bought GTA on.', uid: 2, at: Date.now() },
   { id: 3, cat: 'scripting', title: 'Your first script', body: 'Check the docs — it only takes a few lines to make things happen.', uid: 3, at: Date.now() }
 ];
@@ -123,11 +123,11 @@ function serverRow(s) {
     for (const f of fs.readdirSync(imgDir)) fs.copyFileSync(path.join(imgDir, f), path.join(outDir, 'img', f));
   }
   try {
-    const exe = path.join(__dirname, '..', '..', 'GTAMP-Launcher-v1.9.4.exe');
-    if (fs.existsSync(exe)) fs.copyFileSync(exe, path.join(outDir, 'GTAMP-Launcher-v1.9.4.exe'));
+    const exe = path.join(__dirname, '..', '..', 'GTAMP-Launcher-v1.9.5.exe');
+    if (fs.existsSync(exe)) fs.copyFileSync(exe, path.join(outDir, 'GTAMP-Launcher-v1.9.5.exe'));
   } catch (e) {}
   fs.writeFileSync(path.join(outDir, 'sample-servers.json'), JSON.stringify({ servers: live() }));
-  fs.writeFileSync(path.join(outDir, 'launcher-version.json'), JSON.stringify({ version: '1.9.4', url: '/download/GTAMP-Launcher-v1.9.4.exe' }));
+  fs.writeFileSync(path.join(outDir, 'launcher-version.json'), JSON.stringify({ version: '1.9.5', url: '/download/GTAMP-Launcher-v1.9.5.exe' }));
 
   console.log('Static site built at ' + outDir);
   console.log('Open ' + path.join(outDir, 'index.html'));

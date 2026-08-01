@@ -18,6 +18,8 @@
   #brand svg{width:14px;height:14px}
   #status{margin-top:20px;font-size:12px;letter-spacing:2.6px;text-transform:uppercase;color:ivory;text-align:center;min-height:16px;max-width:340px;line-height:1.5}
   #sub{margin-top:6px;font-size:11px;color:#8a8f9c;text-align:center;min-height:14px;max-width:340px;line-height:1.5}
+  #timer{margin-top:4px;font-size:10px;color:#565b68;text-align:center;letter-spacing:.12em;font-variant-numeric:tabular-nums;display:none}
+  #stage{margin-top:2px;font-size:9px;color:#3f434e;text-align:center;font-family:Consolas,Menlo,monospace;max-width:340px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:none}
   #steps{margin-top:16px;width:100%;max-width:296px;min-height:148px}
   .step{display:flex;align-items:center;gap:9px;font-size:11.5px;color:#5d626e;padding:3.5px 0;transition:color .25s}
   .step.active{color:ivory}
@@ -51,6 +53,8 @@
   <svg id="logo" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 1 L29 8.5 V23.5 L16 31 L3 23.5 V8.5 Z" fill="#f40552"/><path d="M11 21.5 V10.5 h7.2 c2.6 0 4.3 1.5 4.3 3.9 0 1.6-.8 2.8-2.1 3.4 L23 21.5 h-3.4 l-2.2-3.4 H14 v3.4 Z M14 13.2 v2.2 h4 c1 0 1.6-.5 1.6-1.1 s-.6-1.1-1.6-1.1 Z" fill="#fff"/></svg>
   <div id="status">STARTING GTAMP</div>
   <div id="sub"></div>
+  <div id="timer"></div>
+  <div id="stage"></div>
   <div id="steps"></div>
   <div id="bar"><i></i></div>
   <div id="error"></div>
@@ -69,7 +73,18 @@
   var barEl = document.getElementById('bar');
   var errEl = document.getElementById('error');
   var cancelBtn = document.getElementById('cancel');
+  var timerEl = document.getElementById('timer');
+  var stageEl = document.getElementById('stage');
   document.getElementById('foot').textContent = 'GTAMP v' + VER;
+
+  // v1.9.5 — renderer-side live clock: proves the UI is alive and shows real elapsed time
+  var t0 = Date.now(), lastStatus = '', stageLine = '';
+  function fmt(ms){ var s = Math.floor(ms/1000); var m = Math.floor(s/60); return (m>0? m+'m ':'') + (s%60) + 's'; }
+  if (MODE === 'connect') { timerEl.style.display = 'block'; stageEl.style.display = 'block'; }
+  setInterval(function(){
+    if (MODE !== 'connect' || errEl.style.display === 'flex') return;
+    timerEl.textContent = 'elapsed ' + fmt(Date.now() - t0) + (lastStatus ? ' — this step ' + fmt(Date.now() - lastStatus.t) : '');
+  }, 1000);
 
   if (MODE === 'connect') {
     cancelBtn.style.display = 'block';
@@ -98,8 +113,8 @@
   if (window.gtamp && window.gtamp.loading) {
     window.gtamp.loading.onSteps(renderSteps);
     window.gtamp.loading.onStatus(function(d){
-      if (d.status !== undefined && d.status !== '') statusEl.textContent = d.status;
-      if (d.sub !== undefined) subEl.textContent = d.sub;
+      if (d.status !== undefined && d.status !== '') { statusEl.textContent = d.status; lastStatus = { t: Date.now() }; }
+      if (d.sub !== undefined) { subEl.textContent = d.sub; if (d.sub) { stageLine = d.sub; stageEl.textContent = d.sub; } }
       if (typeof d.pct === 'number') {
         barEl.classList.add('det');
         barEl.querySelector('i').style.width = Math.round(d.pct * 100) + '%';
