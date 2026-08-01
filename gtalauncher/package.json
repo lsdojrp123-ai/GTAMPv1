@@ -1,6 +1,6 @@
 {
   "name": "gtamp-launcher",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "GTAMP - GTA Multiplayer Launcher (FiveM-style) \u2014 splash startup, ownership check, connect loading",
   "main": "src/main/main.js",
   "author": "GTAMP",
@@ -9,7 +9,7 @@
     "start": "electron .",
     "dev": "electron . --dev",
     "pack": "electron-builder --dir",
-    "dist": "electron-builder --win portable --x64",
+    "dist": "electron-builder --win --x64",
     "server": "node src/fxserver/index.js"
   },
   "build": {
@@ -50,6 +50,12 @@
     "win": {
       "target": [
         {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
           "target": "portable",
           "arch": [
             "x64"
@@ -71,7 +77,17 @@
     "asarUnpack": [
       "**/client/client-bridge.js",
       "**/node_modules/ws/**/*"
-    ]
+    ],
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "GTAMP",
+      "runAfterFinish": true,
+      "artifactName": "GTAMP-Setup.${ext}"
+    }
   },
   "devDependencies": {
     "electron": "^28.0.0",

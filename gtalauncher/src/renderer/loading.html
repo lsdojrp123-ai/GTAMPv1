@@ -82,6 +82,12 @@
   var timerEl = document.getElementById('timer');
   var stageEl = document.getElementById('stage');
   document.getElementById('foot').textContent = 'GTAMP v' + VER;
+  if (VER) { // v2.1.0 — version must be unmissable in ANY screenshot
+    var vb = document.createElement('span');
+    vb.style.cssText = 'position:absolute;top:14px;right:16px;font-size:11px;letter-spacing:2px;color:#f40552;font-weight:400';
+    vb.textContent = 'v' + VER;
+    document.getElementById('wrap').appendChild(vb);
+  }
 
   // v1.9.5 — renderer-side live clock: proves the UI is alive and shows real elapsed time
   var t0 = Date.now(), lastStatus = '', stageLine = '';

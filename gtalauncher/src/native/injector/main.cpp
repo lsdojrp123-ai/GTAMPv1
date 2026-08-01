@@ -94,6 +94,31 @@ static HWND findWindowForPid(DWORD pid, wchar_t* titlesOut = NULL, HWND* softOut
     return c.hwnd;
 }
 
+// v2.1.0 — SECOND, independent way to see the game: FIND THE ACTUAL WINDOW. If GTA is on
+// the user's screen, its top-level window title is "Grand Theft Auto V" (Legacy) or
+// "Grand Theft Auto V Enhanced" — adopt THAT pid even if the process-name scan somehow
+// cannot see it (launcher wrapper, renamed exe, store variant). Directly answers the
+// report: "it doesn't know that the game is open".
+struct AdoptCtx { DWORD pid; wchar_t title[260]; };
+static BOOL CALLBACK enumAdopt(HWND h, LPARAM lp) {
+    AdoptCtx* c = (AdoptCtx*)lp;
+    if (!IsWindowVisible(h)) return TRUE;
+    wchar_t t[260] = { 0 }; GetWindowTextW(h, t, 259);
+    if (!t[0]) return TRUE;
+    wchar_t low[260]; wcscpy(low, t); CharLowerW(low);
+    if (wcsstr(low, L"grand theft auto")) { // matches Legacy + Enhanced titles
+        DWORD p = 0; GetWindowThreadProcessId(h, &p);
+        if (p) { c->pid = p; wcsncpy(c->title, t, 259); c->title[259] = 0; return FALSE; }
+    }
+    return TRUE;
+}
+static DWORD findPidByGameWindow(wchar_t* titleOut) {
+    AdoptCtx c; c.pid = 0; c.title[0] = 0;
+    EnumWindows(enumAdopt, (LPARAM)&c);
+    if (titleOut) { wcsncpy(titleOut, c.title, 259); titleOut[259] = 0; }
+    return c.pid;
+}
+
 // v1.9.9 — can we actually open the process for injection? (elevated game from a
 // non-elevated launcher = ACCESS_DENIED; fail fast with a clear error instead of
 // burning the whole window wait and dying at CreateRemoteThread minutes later)
@@ -107,9 +132,9 @@ static bool canOpenForInject(DWORD pid) {
 static DWORD WINAPI winMainThunk(LPVOID) { return 0; }
 
 int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, wchar_t* cmd, int) {
-    wchar_t dll[1024] = { 0 }, process[260] = L"GTA5.exe";
+    wchar_t dll[1024] = { 0 }, process[260] = L"GTA5.exe", adoptedTitle[260] = { 0 };
     DWORD pid = 0, waitMs = 120000, settleMs = 6000, pidTimeoutMs = 0;
-    bool waitPid = false, waitWindow = false, alreadyRunning = false, dlloverride = false;
+    bool waitPid = false, waitWindow = false, alreadyRunning = false, dlloverride = false, adoptedByWindow = false;
     {
         // parse from our own copy of the command line (GUI-subsystem apps get it via GetCommandLineW)
         int argc = 0; wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -127,12 +152,17 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, wchar_t* cmd, int) {
         }
         LocalFree(argv);
     }
-    dbg(L"GTAMP injector 2.0.0 pid=%lu dlloverride=%d waitpid=%d waitwindow=%d alreadyrunning=%d settle=%lums timeout=%lums dll=[%s]",
+    dbg(L"GTAMP injector 2.1.0 pid=%lu dlloverride=%d waitpid=%d waitwindow=%d alreadyrunning=%d settle=%lums timeout=%lums dll=[%s]",
         pid, dlloverride ? 1 : 0, waitPid ? 1 : 0, waitWindow ? 1 : 0, alreadyRunning ? 1 : 0, settleMs, waitMs, dll);
 
     // --probe: instant process check, no injection and no --dll required (v1.9.8 native gtaRunning)
     if (argFlag(L"--probe")) {
         DWORD p = pid ? pid : findPid(process);
+        if (!p) {
+            wchar_t at[260] = { 0 };
+            p = findPidByGameWindow(at); // v2.1.0 — see the game by its window, always
+            if (p) stage(L"stage:process-adopted-by-window pid=%lu title=\"%s\"", p, at);
+        }
         if (p && processAlive(p)) { stage(L"stage:process-found pid=%lu%s", p, canOpenForInject(p) ? L"" : L" elevated=1"); return 0; }
         stage(L"error:process-timeout %s", process);
         return 1;
@@ -146,6 +176,11 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, wchar_t* cmd, int) {
         int ptick = 0;
         for (;;) {
             pid = findPid(process);
+            if (!pid) {
+                wchar_t at[260] = { 0 };
+                pid = findPidByGameWindow(at); // v2.1.0 — if you can SEE the game, so can we
+                if (pid) { adoptedByWindow = true; wcsncpy(adoptedTitle, at, 259); adoptedTitle[259] = 0; }
+            }
             if (pid) break;
             if (!waitPid || GetTickCount64() >= deadline) { stage(L"error:process-timeout %s", process); return 1; }
             if ((++ptick % 10) == 0) stage(L"stage:waiting-pid sec=%lu", (DWORD)(ptick / 2));
@@ -153,6 +188,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, wchar_t* cmd, int) {
         }
     }
     stage(L"stage:process-found pid=%lu", pid);
+    if (adoptedByWindow) stage(L"stage:process-adopted-by-window pid=%lu title=\"%s\"", pid, adoptedTitle);
 
     // v1.9.9 — elevation/access pre-check: if we can never open the process for injection
     // (game running as admin, launcher not), say so in seconds, not after the window wait
@@ -164,7 +200,11 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, wchar_t* cmd, int) {
 
     // 2) window wait (FiveM-parity settled-D3D gate) — skipped for reused instances
     bool windowOk = false;
-    if (waitWindow && !alreadyRunning) {
+    if (adoptedByWindow) {
+        // v2.1.0 — we FOUND the game through this window; the D3D gate is already satisfied
+        stage(L"stage:window-found pid=%lu title=\"%s\"", pid, adoptedTitle);
+        windowOk = true;
+    } else if (waitWindow && !alreadyRunning) {
         ULONGLONG wstart = GetTickCount64();
         ULONGLONG deadline = wstart + waitMs;
         wchar_t title[260] = { 0 };

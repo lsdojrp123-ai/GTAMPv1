@@ -819,7 +819,7 @@ function verifyGtaOwnership(dir) {
 }
 
 // ---------- Loading window: startup splash + server connect (v1.7.0) ----------
-const LAUNCHER_VER = '2.0.0';
+const LAUNCHER_VER = '2.1.0';
 function openLoading(mode, opts = {}) {
   closeLoading();
   loadingWin = new BrowserWindow({
@@ -1289,9 +1289,15 @@ async function checkForLauncherUpdate() {
   try {
     const j = await httpsJson('https://api.github.com/repos/' + UPDATE_REPO + '/releases/latest', 5000);
     const tag = j && String(j.tag_name || '').replace(/^v/, '');
-    const asset = j && (j.assets || []).find(a => /\.exe$/i.test(a.name || ''));
+    // v2.1.0 — two artifacts per release: fixed-name installer (GTAMP-Setup.exe, for INSTALLED
+    // builds; silent in-place update) + versioned portable exe (for portable builds / legacy updaters)
+    const assets = (j && j.assets) || [];
+    const setupAsset = assets.find(a => /^GTAMP-Setup\.exe$/i.test(a.name || ''));
+    const portableAsset = assets.find(a => /^GTAMP-Launcher-v/i.test(a.name || '') && /\.exe$/i.test(a.name || ''));
+    const installed = isInstalledBuild();
+    const asset = installed ? (setupAsset || portableAsset) : (portableAsset || setupAsset);
     if (tag && asset && asset.browser_download_url) {
-      return { version: tag, exeUrl: asset.browser_download_url, source: 'github' };
+      return { version: tag, exeUrl: asset.browser_download_url, source: 'github', installed };
     }
   } catch {}
   // 2) community website fallback
@@ -1315,6 +1321,13 @@ async function checkForLauncherUpdate() {
   } catch {}
   return null;
 }
+// v2.1.0 — are we the NSIS-installed copy (%LocalAppData%\Programs\...) or a portable exe?
+function isInstalledBuild() {
+  try {
+    const la = String(process.env.LOCALAPPDATA || '').toLowerCase();
+    return !!la && String(process.execPath || '').toLowerCase().startsWith(la);
+  } catch { return false; }
+}
 async function doSelfUpdate(upd, loadingStatus, sleep) {
   writeLaunchDiag(['self-update available: v' + upd.version + ' from ' + upd.source + ' (' + upd.exeUrl + ')']);
   if (process.platform !== 'win32' || !app.isPackaged) {
@@ -1322,6 +1335,33 @@ async function doSelfUpdate(upd, loadingStatus, sleep) {
     return false;
   }
   const path = require('path'), fs = require('fs');
+  // v2.1.0 — INSTALLED build: update by silently re-running GTAMP-Setup.exe over ourselves,
+  // exactly like FiveM's bootstrapper. Setup's preInit kills this process; install completes
+  // unlocked; the app relaunches on the new version. Shortcut/pin always points at the current build.
+  if (isInstalledBuild() && /^GTAMP-Setup\.exe$/i.test((upd.exeUrl || '').split('/').pop() || '')) {
+    loadingStatus('UPDATING GTAMP', 'GTAMP v' + upd.version + ' — downloading update…', 0);
+    try {
+      const dest = path.join(require('os').tmpdir(), 'GTAMP-Setup.exe');
+      let lastPctI = -1;
+      const okI = await downloadWithProgress(upd.exeUrl, dest, (pct, got, total) => {
+        const p2 = Math.round(pct * 100);
+        if (p2 !== lastPctI) { lastPctI = p2; loadingStatus('UPDATING GTAMP', 'Downloading v' + upd.version + ' — ' + p2 + '%', pct); }
+      });
+      if (!okI) { writeLaunchDiag(['self-update: setup download failed']); return false; }
+      const stI = fs.statSync(dest);
+      const fdI = fs.openSync(dest, 'r'); const headI = Buffer.alloc(2); fs.readSync(fdI, headI, 0, 2, 0); fs.closeSync(fdI);
+      if (stI.size < 8 * 1048576 || headI.toString('latin1') !== 'MZ') { writeLaunchDiag(['self-update: setup sanity failed']); return false; }
+      loadingStatus('UPDATING GTAMP', 'Installing v' + upd.version + ' — GTAMP will restart itself…', 1);
+      writeLaunchDiag(['self-update: silent setup spawn (' + stI.size + ' bytes)']);
+      await sleep(1200);
+      const args = ['/S']; if (process.env.GTAMP_SETUP_FORCE_RUN !== '0') args.push('--force-run');
+      const c = spawn(dest, args, { detached: true, stdio: 'ignore', windowsHide: false });
+      c.on('error', e => writeLaunchDiag(['self-update: setup spawn error: ' + e.message]));
+      c.unref();
+      setTimeout(() => { try { app.exit(0); } catch {} }, 900);
+      return true;
+    } catch (e) { writeLaunchDiag(['self-update: installed flow exception: ' + e.message]); return false; }
+  }
   loadingStatus('UPDATING GTAMP', 'GTAMP v' + upd.version + ' is available — downloading (FiveM-style auto-update)…', 0);
   try {
     const dir = path.dirname(process.execPath);
@@ -1586,6 +1626,12 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
     } else if (line.startsWith('stage:waiting-window')) {
       const m = line.match(/sec=(\d+)/);
       setStep(7, 'active', 'GTA5.exe is running — waiting for its window (' + (m ? m[1] : '?') + 's; injecting anyway at ' + Math.round(windowCap / 1000) + 's)');
+    } else if (line.startsWith('stage:process-adopted-by-window')) {
+      // v2.1.0 — the game was spotted by its WINDOW ("Grand Theft Auto V"), not a process scan:
+      // the exact "it doesn't know the game is open" report, annihilated
+      const m = line.match(/pid=(\d+)/);
+      setStep(7, 'active', 'Game spotted on your screen' + (m ? ' (pid ' + m[1] + ')' : '') + ' — moving to injection…');
+      procLineShown = true;
     } else if (line.startsWith('stage:process-found')) {
       const m = line.match(/pid=(\d+)/);
       setStep(7, 'active', 'Game process found' + (m ? ' (pid ' + m[1] + ')' : '') + ' — waiting for the game window…');
@@ -1826,16 +1872,39 @@ function createWindow() {
 // stale GTAMP processes and retake the lock instead of app.exit(0).
 function killStaleLauncherInstances() {
   if (process.platform !== 'win32' || !app.isPackaged) return;
-  try { require('child_process').execSync('taskkill /F /IM "GTAMP-Launcher-*.exe" /FI "PID ne ' + process.pid + '"', { windowsHide: true, stdio: 'ignore', timeout: 8000 }); } catch {}
+  const me = process.pid;
+  // v2.1.0 — every name a GTAMP build has ever shipped under (versioned portable, installed, renamed)
+  for (const im of ['GTAMP-Launcher-*.exe', 'GTAMP Launcher.exe', 'gtamp-launcher*.exe']) {
+    try { require('child_process').execSync('taskkill /F /IM "' + im + '" /FI "PID ne ' + me + '"', { windowsHide: true, stdio: 'ignore', timeout: 8000 }); } catch {}
+  }
   try { require('child_process').execSync('taskkill /F /IM gtamp_injector.exe', { windowsHide: true, stdio: 'ignore', timeout: 8000 }); } catch {}
-  try { writeLaunchDiag(['stale instance takeover: killed old GTAMP launcher/injector processes']); } catch {}
+  // last-resort sweep: ANY process whose exe path mentions GTAMP (covers renamed downloads) except us
+  try {
+    require('child_process').execSync("powershell -NoProfile -NonInteractive -Command \"Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne ' + me + ' -and $_.ExecutablePath -like '*GTAMP*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }\"", { windowsHide: true, stdio: 'ignore', timeout: 15000 });
+  } catch {}
+  try { writeLaunchDiag(['stale instance takeover: old GTAMP launcher/injector processes killed']); } catch {}
 }
 let singleInstanceLock = app.requestSingleInstanceLock();
 if (!singleInstanceLock) {
   killStaleLauncherInstances();
-  try { require('child_process').execSync('ping 127.0.0.1 -n 2 >nul', { windowsHide: true, stdio: 'ignore', timeout: 5000 }); } catch {} // ~1s for the mutex to release
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500); // sleep 1.5s, no shell spawn
   singleInstanceLock = app.requestSingleInstanceLock();
-  if (!singleInstanceLock) app.exit(0); // genuinely could not take over — bail as before
+  if (!singleInstanceLock) {
+    // v2.1.0 — NEVER exit silently: the stuck OLD window would just sit there and the user
+    // would think this new file 'did nothing and is still stuck'. Say it, on screen, natively.
+    writeLaunchDiag(['takeover FAILED — old instance survived taskkill sweeps; showing blocking popup']);
+    app.whenReady().then(() => {
+      try {
+        dialog.showMessageBoxSync({
+          type: 'error', title: 'GTAMP v' + LAUNCHER_VER,
+          message: 'An old GTAMP window is stuck and Windows will not let GTAMP close it.',
+          detail: 'Do this once:\n\n1) Press Ctrl+Shift+Esc (Task Manager)\n2) Find anything named GTAMP in the list\n3) Click it, then click End task\n4) Run GTAMP again\n\n(Or just restart your PC — that also clears it.)',
+          buttons: ['OK']
+        });
+      } catch {}
+      app.exit(1);
+    });
+  }
 }
 if (singleInstanceLock) {
   app.on('second-instance', () => {
