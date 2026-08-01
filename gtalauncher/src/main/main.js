@@ -795,7 +795,7 @@ function verifyGtaOwnership(dir) {
 }
 
 // ---------- Loading window: startup splash + server connect (v1.7.0) ----------
-const LAUNCHER_VER = '1.7.0';
+const LAUNCHER_VER = '1.7.1';
 function openLoading(mode, opts = {}) {
   closeLoading();
   loadingWin = new BrowserWindow({
@@ -834,12 +834,16 @@ function ensureTray() {
     if (!img.isEmpty()) img = img.resize({ width: 16, height: 16 });
     tray = new Tray(img.isEmpty() ? nativeImage.createEmpty() : img);
     tray.setToolTip('GTAMP');
+    const showMain = () => {
+      if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus(); }
+      else if (startupDone) createWindow();
+    };
     tray.setContextMenu(Menu.buildFromTemplate([
-      { label: 'Show GTAMP', click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } } },
+      { label: 'Show GTAMP', click: showMain },
       { type: 'separator' },
       { label: 'Quit GTAMP', click: () => app.quit() }
     ]));
-    tray.on('click', () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } });
+    tray.on('click', showMain);
   } catch (e) { writeLaunchDiag(['tray: ' + e.message]); }
   return tray;
 }
@@ -1202,6 +1206,11 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
 
 // ---------- Window ----------
 function createWindow() {
+  // v1.7.1: never create a duplicate main window — re-show the existing one
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try { mainWindow.show(); mainWindow.focus(); } catch {}
+    return;
+  }
   mainWindow = new BrowserWindow({
     width: 1280, height: 780, minWidth: 1024, minHeight: 640,
     backgroundColor: '#0a0a0f', frame: false, title: 'GTAMP',
@@ -1210,6 +1219,10 @@ function createWindow() {
       preload: path.join(__dirname,'..','preload','preload.js'),
       contextIsolation: true, nodeIntegration: false, sandbox: false
     }
+  });
+  mainWindow.once('ready-to-show', () => { try { mainWindow.show(); mainWindow.focus(); } catch {} });
+  mainWindow.webContents.on('did-fail-load', (_e, code, desc) => {
+    try { writeLaunchDiag(['main window load FAILED ' + code + ' ' + desc]); } catch {}
   });
   mainWindow.loadFile(path.join(__dirname,'..','renderer','index.html'));
   if (isDev || config.devTools) mainWindow.webContents.openDevTools({mode:'detach'});
@@ -1223,7 +1236,13 @@ function createWindow() {
 // v1.7.0: splash screen FIRST (FiveM-style), main window only after startup done.
 app.whenReady().then(() => { runStartup(); });
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0 && startupDone) createWindow(); });
-app.on('window-all-closed', () => { cleanup(); if (process.platform!=='darwin') app.quit(); });
+// v1.7.1 hotfix: the loading/connect window is TRANSIENT. When it closes it briefly
+// leaves ZERO windows (e.g. splash closes right before createWindow()). Quitting there
+// killed the whole app before the launcher ever appeared — guard with startupDone.
+app.on('window-all-closed', () => {
+  if (!startupDone) return; // transient window swap in progress — do nothing
+  if (BrowserWindow.getAllWindows().length === 0) { cleanup(); if (process.platform!=='darwin') app.quit(); }
+});
 app.on('before-quit', cleanup);
 Menu.setApplicationMenu(null);
 
