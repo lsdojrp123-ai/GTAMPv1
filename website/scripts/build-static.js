@@ -54,6 +54,8 @@ function render(view, data, outName) {
         if (p.startsWith('/css/') || p.startsWith('/js/')) return attr + '=' + q + up + p.slice(1) + q;
         if (p.startsWith('/download/')) return attr + '=' + q + up + p.replace('/download/', '') + q;
         if (p.startsWith('/artifacts/') || p.startsWith('/api/')) return attr + '=' + q + '#' + q;
+        // POST form targets can't work in a static (file://) build — neutralize
+        if (attr === 'action' && (p === '/login' || p === '/register' || p.startsWith('/keymaster/') || p.startsWith('/admin/') || /\/(new|reply|publish)$/.test(p))) return attr + '=' + q + '#' + q;
         if (p === '/logout') return attr + '=' + q + up + 'index.html' + q;
         const t = p.replace(/^\//, '');
         if (/^forum\/thread\/\d+$/.test(t)) return attr + '=' + q + up + t.replace('thread/', 'thread-') + '.html' + q;

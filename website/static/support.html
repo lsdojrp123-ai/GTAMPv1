@@ -4,23 +4,26 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>GTAMP</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@500&family=Rubik:ital,wght@0,300;0,400;1,300;1,400&family=Material+Icons+Outlined&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="./css/style.css">
 </head>
 <body>
 <header>
-  <div class="wrap nav">
-    <a href="./index.html" class="brand"><span class="mark">G</span>GTAMP</a>
-    <a href="./index.html" class="navlink active">Home</a>
-    <a href="./servers.html" class="navlink ">Server List</a>
-    <a href="./forum.html" class="navlink">Forum</a>
-    <a href="./marketplace.html" class="navlink">Marketplace</a>
-    <a href="./docs.html" class="navlink">Documentation</a>
-    <a href="./support.html" class="navlink">Support</a>
-    <div class="spacer"></div>
-    
-      <a href="./login.html" class="btn btn-ghost btn-sm">Login</a>
-      <a href="./register.html" class="btn btn-accent btn-sm">Register</a>
-    
+  <div class="bar">
+    <a href="./index.html" class="logo"><span class="logo-img">G</span><span class="logo-title">GTAMP</span></a>
+    <ul class="links">
+      <li><a href="./servers.html" class="">Server List</a></li>
+      <li><a href="./support.html" class="">Support</a></li>
+      <li><a href="./keymaster.html" class="">Portal</a></li>
+      <li><a href="./forum.html" class="">Forum</a></li>
+      <li><a href="./marketplace.html" class="">Marketplace</a></li>
+      <li><a href="./docs.html" class="">Documentation</a></li>
+      
+        <li><a href="./login.html">Login</a></li>
+      
+    </ul>
   </div>
 </header>
 
@@ -37,24 +40,30 @@
 <footer>
   <div class="wrap">
     <div class="cols">
-      <div style="flex:2">
-        <div class="brand" style="margin-bottom:10px"><span class="mark">G</span>GTAMP</div>
-        <p class="muted" style="max-width:320px">FiveM-style GTA V multiplayer launcher. Run your own servers, browse the community, and script your own world.</p>
+      <div style="flex:2;min-width:220px">
+        <a href="./index.html" class="logo" style="margin-bottom:10px"><span class="logo-img">G</span><span class="logo-title">GTAMP</span></a>
+        <p class="muted" style="max-width:320px;font-size:var(--fs08)">Multiplayer-enabled modification framework for Grand Theft Auto V — our own code.</p>
       </div>
       <div>
         <h4>Product</h4>
-        <a href="./index.html">Home</a><a href="./servers.html">Servers</a><a href="./GTAMP-Launcher-v1.6.0.exe">Download</a><a href="./run-server.html">Run your own server</a>
+        <a href="./index.html">Home</a>
+        <a href="./servers.html">Server List</a>
+        <a href="./GTAMP-Launcher-v1.6.0.exe">Download</a>
+        <a href="./run-server.html">Run your own server</a>
       </div>
       <div>
         <h4>Community</h4>
-        <a href="./forum.html">Forums</a><a href="./marketplace.html">Marketplace</a><a href="./docs.html">Docs</a><a href="./support.html">Support</a>
+        <a href="./forum.html">Forum</a>
+        <a href="./marketplace.html">Marketplace</a>
+        <a href="./docs.html">Documentation</a>
+        <a href="./support.html">Support</a>
       </div>
       <div>
         <h4>Account</h4>
         <a href="./login.html">Login</a><a href="./register.html">Register</a>
       </div>
     </div>
-    <div class="muted">© 2026 GTAMP. Not affiliated with Rockstar Games or Cfx.re.</div>
+    <div class="copyright">GTAMP — not affiliated with Rockstar Games, Take-Two Interactive, or Cfx.re (FiveM).</div>
   </div>
 </footer>
 <script src="./js/main.js"></script>
