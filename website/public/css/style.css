@@ -399,3 +399,66 @@ section.hero .cta .btn-ghost{padding:var(--qh) var(--q);font-size:var(--fs08);le
 
 /* inputs: their control-height 48px feel */
 input[type=text],input[type=password],input[type=email],input[type=number],textarea,select{min-height:44px}
+
+/* ==========================================================================
+   SERVER LIST — measured 1:1 layout pass (servers.fivem.net geometry)
+   quant ≈ their scale · players col 20q · radius 6px · upvote pink #ff75ac
+   ========================================================================== */
+
+/* hero heading block w/ subtle bg pattern */
+.sv-hero{
+  width:100%;padding:56px 24px 28px;
+  background:
+    radial-gradient(700px 200px at 80% 0, rgba(244,5,82,.08), transparent 65%),
+    repeating-linear-gradient(45deg, rgba(255,255,255,.02) 0 2px, transparent 2px 7px);
+  border-bottom:1px solid var(--color-text-a10);
+}
+.sv-hero .in{max-width:1100px;margin:0 auto}
+.sv-hero h1{font-size:40px;font-weight:300;letter-spacing:8px;text-transform:uppercase;color:var(--color-text)}
+.sv-hero h1 b{color:var(--color-accent-1);font-weight:500}
+.sv-hero .sub{margin-top:10px;color:var(--color-text-a50);font-size:var(--fs1)}
+
+/* controls row */
+.sv-controls{max-width:1100px;margin:0 auto;padding:20px 24px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.sv-search{flex:1;min-width:280px;position:relative}
+.sv-search input{width:100%;height:52px;padding:0 18px 0 46px;border-radius:6px;background:rgba(255,255,255,.045);border:1px solid var(--color-text-a10);font-size:16px}
+.sv-search input:focus{border-color:var(--color-accent-1);background:rgba(255,255,255,.06)}
+.sv-search .si{position:absolute;left:16px;top:50%;transform:translateY(-50%);color:var(--color-text-a50);font-size:20px;pointer-events:none}
+.sv-controls select{height:52px;border-radius:6px;padding:0 14px;background:rgba(255,255,255,.045)}
+.sv-controls .sv-count{color:var(--color-text-a50);font-size:var(--fs08);white-space:nowrap}
+.sv-controls .sv-count b{color:var(--color-text);font-weight:400}
+
+/* rows: bg card · 48 icon · name/desc · fixed players col · pink upvote pill */
+.sv-list{display:flex;flex-direction:column;gap:8px;max-width:1100px;margin:0 auto;padding:0 24px 56px}
+.sv-row{
+  display:flex;align-items:center;gap:16px;
+  min-height:72px;padding:12px 16px;border-radius:6px;
+  background:rgba(255,255,255,.03);
+  cursor:pointer;transition:background .12s ease;
+}
+.sv-row:hover{background:rgba(255,255,255,.055)}
+.sv-row.boosted{box-shadow:0 0 0 1px rgba(255,117,172,.35);background:rgba(255,117,172,.05)}
+.sv-icon{
+  width:48px;height:48px;border-radius:6px;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;
+  font-size:20px;font-weight:500;color:#fff;
+  background:linear-gradient(135deg,#2a2f3e,#161923);
+  border:1px solid var(--color-text-a10);
+}
+.sv-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+.sv-name{font-size:16px;font-weight:500;color:#f1f1e4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sv-name .live-dot{margin-right:7px}
+.sv-burst{color:#ff75ac;font-size:13px;margin-right:6px}
+.sv-desc{font-size:13px;color:var(--color-text-a50);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:300}
+.sv-tags{display:flex;gap:6px;margin-top:3px;flex-wrap:wrap}
+.sv-tags .tag{font-size:11px;padding:2px 8px;border-radius:3px;background:rgba(255,255,255,.05);color:var(--color-text-a75)}
+.sv-right{display:flex;align-items:center;gap:20px;flex-shrink:0}
+.sv-players{width:110px;text-align:right}
+.sv-players .n{font-size:16px;font-weight:400;color:#f1f1e4}
+.sv-players .n small{color:var(--color-text-a50);font-weight:300}
+.sv-players .c{font-size:11px;color:var(--color-text-a50);text-transform:uppercase;letter-spacing:1px}
+.sv-pbar{margin-top:6px;width:110px;height:3px;border-radius:2px;background:rgba(255,255,255,.08);overflow:hidden}
+.sv-pbar i{display:block;height:100%;background:var(--color-accent-1);border-radius:2px}
+.sv-upvote{display:flex;align-items:center;gap:6px;padding:6px 12px;border-radius:6px;background:rgba(255,117,172,.08);color:#ff75ac;font-size:13px;font-weight:500}
+.sv-upvote .ai{font-size:14px}
+@media(max-width:720px){.sv-right{gap:10px}.sv-upvote{display:none}.sv-players{width:90px}.sv-hero h1{font-size:28px;letter-spacing:4px}}
