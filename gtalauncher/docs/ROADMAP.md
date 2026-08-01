@@ -41,6 +41,9 @@
 - **T chat** in-game (FiveM keybinding); F9 toggles the debug HUD.
 - **Tray/background**: GTAMP keeps running in the tray while you play; quitting GTA returns you to the launcher; `disconnectSession` cleans the session from console/launcher.
 
+## v1.9.1 — hotfix: never force-kill GTA/Rockstar processes
+- v1.9.0's prep step `taskkill /F`'d GTA5.exe + the Rockstar launcher → Rockstar reported "Grand Theft Auto V Legacy exited unexpectedly" on the next launch. FiveM never force-kills the game; its `-switchcl` flow **reuses** a running instance. We now do the same: Connect with GTA already running switches into the GTAMP session without relaunch, force-kill is behind an explicit `GTAMP_FORCE_KILL=1` escape hatch, and the window-wait fails fast ("GTA V exited unexpectedly" card with OK/Retry guidance) if the game dies mid-boot instead of sitting 4 minutes silent.
+
 ## v1.9.0 — FiveM parity pass (study: citizenfx/fivem source) — current packaged release
 - **ERR_GFX_D3D_INIT fix** — root cause was injecting into GTA5.exe while D3D was still initializing. FiveM's launcher never touches the game until its own D3D is up; we now mirror that contract: connect flow waits for the **game window** (== gfx init done) + a settle grace before injecting. DllMain pins system d3d11/dxgi DLLs first (their `Main.cpp` "must load a d3d11.dll before anything else"). Loading screen kill via `SHUTDOWN_LOADING_SCREEN` → straight into gameplay like FiveM.
 - **FiveM-ordered 13-step connect flow** — runtime init → ownership → game files → environment prep (settings.xml forced to DirectX 11 + HDR off, stale GTA procs killed) → updating components (`/api/launcher/version`) → Rockstar services → launch → window wait → settle → inject → link → server handshake → session.

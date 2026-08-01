@@ -819,7 +819,7 @@ function verifyGtaOwnership(dir) {
 }
 
 // ---------- Loading window: startup splash + server connect (v1.7.0) ----------
-const LAUNCHER_VER = '1.9.0';
+const LAUNCHER_VER = '1.9.1';
 function openLoading(mode, opts = {}) {
   closeLoading();
   loadingWin = new BrowserWindow({
@@ -1085,8 +1085,14 @@ function fixGtaSettings(gtaDir) {
 }
 
 function killGameProcesses() {
-  // Same idea as FiveM's "switchcl" flow: exactly ONE game instance may exist when we connect.
-  const names = ['GTA5.exe', 'GTA5_Enhanced.exe', 'PlayGTAV.exe', 'GTAVLauncher.exe', 'Launcher.exe', 'LauncherPatcher.exe', 'subprocess.exe'];
+  // v1.9.1 — DISABLED by default: force-killing GTA5.exe makes Rockstar's launcher show
+  // "Grand Theft Auto V Legacy exited unexpectedly". Only used deliberately with GTAMP_FORCE_KILL=1
+  // as a last-resort escape hatch for a fully wedged game.
+  const names = ['GTA5.exe', 'GTA5_Enhanced.exe'];
+  if (!process.env.GTAMP_FORCE_KILL) {
+    writeLaunchDiag(['killGameProcesses: skipped (set GTAMP_FORCE_KILL=1 to enable)']);
+    return;
+  }
   for (const n of names) {
     try { require('child_process').execSync('taskkill /F /IM "' + n + '" /T', { windowsHide: true, stdio: 'ignore' }); } catch {}
   }
@@ -1159,8 +1165,17 @@ async function waitForGtaWindow(maxMs, ctl, statusFn) {
   // surfaces once D3D is fully initialised. We mirror that contract: NO injection until GTA has
   // created its real window (== device created & past gfx init), then a settle grace.
   const t0 = Date.now();
+  let deadStreak = 0;
   while (Date.now() - t0 < maxMs) {
     if (ctl && ctl.cancelled) return false;
+    // v1.9.1 — notice the game DYING mid-wait (Rockstar shows "exited unexpectedly") instead of
+    // sitting here for the full timeout while a crash dialog waits for user input.
+    if (!gtaRunning()) {
+      deadStreak++;
+      if (Date.now() - t0 > 12000 && deadStreak >= 2) return -1;
+    } else {
+      deadStreak = 0;
+    }
     try {
       const ps = '(Get-Process -Name GTA5,GTA5_Enhanced -ErrorAction SilentlyContinue | Where-Object {$_.MainWindowHandle -ne 0}).Id -join ","';
       const out = require('child_process').execSync('powershell -NoProfile -Command "' + ps + '"', { windowsHide: true, timeout: 8000 }).toString().trim();
@@ -1277,10 +1292,12 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
   setStep(2, 'done', (v.checks || []).filter(c => c.ok).length + ' checks passed');
 
   // STEP 3 — game environment (FiveM DoPreLaunchTasks parity)
-  setStep(3, 'active', 'Forcing DirectX 11 + clearing stale game processes…');
+  setStep(3, 'active', 'Forcing DirectX 11…');
   const fxSet = fixGtaSettings(config.gtaPath);
   writeLaunchDiag(['prep: ' + (fxSet.detail || '')]);
-  try { killGameProcesses(); } catch {}
+  // v1.9.1 — never taskkill GTA/Rockstar processes. A /F kill is an abnormal exit and Rockstar's
+  // launcher watchdog reports it as "GTA V exited unexpectedly" (and can demand a Safe Mode reboot).
+  // FiveM reuses a running game instead (their -switchcl flow) — STEP 6 below does exactly that.
   let nv = null;
   try { nv = await queryNvNode(); } catch {}
   if (nv && nv.enabled) {
@@ -1314,8 +1331,14 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
   if (ctl.cancelled) return;
   setStep(5, 'done');
 
-  // STEP 6 — launch GTA
+  // STEP 6 — launch GTA (or reuse a running one, FiveM -switchcl style)
   setStep(6, 'active', launch.note || '');
+  let reusedGame = false;
+  if (gtaRunning()) {
+    reusedGame = true;
+    setStep(6, 'done', 'GTA V already running — switching into GTAMP session');
+    writeLaunchDiag(['GTA already running: reusing instance (FiveM switchcl equivalent)']);
+  } else {
   try {
     const useShell = !!launch.shell || launch.kind === 'steam-url' || launch.kind === 'epic';
     writeLaunchDiag(['launching kind=' + launch.kind, 'exe=' + launch.exe, 'args=' + JSON.stringify(launch.args || []), launch.note || '']);
@@ -1332,6 +1355,7 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
   await sleep(1200);
   if (ctl.cancelled) return;
   setStep(6, 'done');
+  }
 
   // STEP 7 — wait for the game process, THEN a real window (= D3D init succeeded)
   setStep(7, 'active', 'The game can take a minute to appear…');
@@ -1356,6 +1380,12 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
   setStep(7, 'active', 'Process found — waiting for the game window (graphics init)…');
   const wPid = await waitForGtaWindow(240000, ctl, (s) => loadingStatus('WAITING FOR GAME WINDOW', s));
   if (ctl.cancelled) return;
+  if (wPid === -1) {
+    fail(7, 'GTA V exited unexpectedly',
+      'The game closed during startup (Rockstar reports this in its "exited unexpectedly" dialog).\n\n1) Click OK in the Rockstar dialog if one is open.\n2) Press Retry here — GTAMP re-launches the game.\nIf it repeats: Safe Mode once (Rockstar dialog button) restores vanilla graphics, then Retry. Update GPU drivers and close overlays (ShadowPlay/Discord/Afterburner) only if it keeps happening.',
+      [{ id: 'retry', label: 'Retry' }, { id: 'cancel', label: 'Cancel' }]);
+    return;
+  }
   if (!wPid) {
     fail(7, 'Game window never appeared',
       'GTA V started but never finished graphics init (e.g. ERR_GFX_D3D_INIT).\n\nGTAMP already forced DirectX 11 in settings.xml and paused ShadowPlay for this session. Still failing usually means: outdated GPU drivers (run the DirectX installer in your GTA folder), or an overlay conflict — close GeForce ShadowPlay / Discord overlay / MSI Afterburner + RivaTuner, reboot once, then Retry.',

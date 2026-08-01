@@ -35,7 +35,7 @@ function defaultSettings() {
     siteName: 'GTAMP',
     tagline: 'FiveM-style GTA V multiplayer',
     version: '1.6.0',
-    downloadUrl: '/download/GTAMP-Launcher-v1.9.0.exe',
+    downloadUrl: '/download/GTAMP-Launcher-v1.9.1.exe',
     activeLauncherCount: 0,
     liveServers: [],
     upvoteBasePriceUsd: 0.50
@@ -64,7 +64,7 @@ function defaultArtifacts() {
 
 function defaultPosts() {
   return [
-    { id: 1, cat: 'announcements', title: 'GTAMP v1.9.0 is live', body: 'FiveM-style launcher, remote players with nametags, F8 chat, and the new website.', uid: 1, at: Date.now() - 86400000 * 3 },
+    { id: 1, cat: 'announcements', title: 'GTAMP v1.9.1 is live', body: 'FiveM-style launcher, remote players with nametags, F8 chat, and the new website.', uid: 1, at: Date.now() - 86400000 * 3 },
     { id: 2, cat: 'client-support', title: 'Fixed: hook loads as v1.5.2', body: 'Reinstall the current launcher — older copies ship the old hook.', uid: 2, at: Date.now() - 86400000 * 2 },
     { id: 3, cat: 'scripting', title: 'Your first GTAMP script', body: 'A few lines of JS or Lua is all it takes — check the docs.', uid: 3, at: Date.now() - 86400000 }
   ];
