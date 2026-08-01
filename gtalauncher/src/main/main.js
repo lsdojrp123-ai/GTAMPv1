@@ -1,5 +1,5 @@
 // src/main/main.js - GTAMP Launcher main process
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu, Tray, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, Tray, nativeImage, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
@@ -819,7 +819,7 @@ function verifyGtaOwnership(dir) {
 }
 
 // ---------- Loading window: startup splash + server connect (v1.7.0) ----------
-const LAUNCHER_VER = '1.9.8';
+const LAUNCHER_VER = '1.9.9';
 function openLoading(mode, opts = {}) {
   closeLoading();
   loadingWin = new BrowserWindow({
@@ -892,6 +892,30 @@ function gtaRunning() {
       { windowsHide: true, encoding: 'utf8', timeout: 6000 }) || '';
     return /GTA5(.exe)?\s|GTA5_Enhanced\.exe/i.test(out);
   } catch { return false; }
+}
+// v1.9.9 — prove Windows will actually RUN gtamp_injector.exe BEFORE we invest minutes of
+// waiting. --probe is instant and does zero injection; if the exe can't even start
+// (antivirus / SmartScreen / quarantine), we fail fast with a precise card.
+function preflightInjector() {
+  try {
+    const inj = findNativeFile('gtamp_injector.exe');
+    if (!inj) return { blocked: 'gtamp_injector.exe is missing from the install' };
+    const r = require('child_process').spawnSync(inj, ['--process', 'GTA5.exe', '--probe'], { windowsHide: true, timeout: 8000, encoding: 'utf16le' });
+    if (r.error) return { blocked: r.error.message };
+    const out = String(r.stdout || '').trim();
+    return { summary: 'exit=' + r.status + ' ' + out.split('\n')[0] };
+  } catch (e) { return { blocked: e.message }; }
+}
+// v1.9.9 — GTA running as admin can only be hooked by an admin launcher. Relaunch ourselves
+// elevated via UAC (PowerShell Start-Process -Verb RunAs) and exit this instance.
+function relaunchElevated() {
+  try {
+    const ps = "Start-Process -FilePath '" + process.execPath.replace(/'/g, "''") + "' -ArgumentList '--elevated' -Verb RunAs";
+    const c = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { detached: true, stdio: 'ignore', windowsHide: true });
+    c.unref();
+    writeLaunchDiag(['relaunching elevated: ' + process.execPath]);
+    setTimeout(() => { try { app.exit(0); } catch {} }, 800);
+  } catch (e) { writeLaunchDiag(['relaunchElevated failed: ' + e.message]); }
 }
 function startGtaExitWatch() {
   stopGtaExitWatch();
@@ -1055,10 +1079,11 @@ async function pickGtaFolderDialog() {
 // Actions from loading.html buttons (startup errors + connect cancel)
 ipcMain.on('loading:action', (_e, act) => {
   const id = typeof act === 'string' ? act : (act && act.id);
-  if (connectCtl && ['cancel', 'retry', 'retryInject', 'pickFolder', 'quit'].includes(id)) {
+  if (connectCtl && ['cancel', 'retry', 'retryInject', 'pickFolder', 'quit', 'relaunchAdmin'].includes(id)) {
     (async () => {
       if (id === 'cancel') return connectCtl.cancel();
       if (id === 'quit') return app.quit();
+      if (id === 'relaunchAdmin') return relaunchElevated();
       if (id === 'pickFolder') {
         const p = await pickGtaFolderDialog();
         if (p) { config.gtaPath = p; saveConfig(config); connectCtl.retry(); }
@@ -1392,9 +1417,28 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
     steps[i].state = state; loadingSteps(steps);
     if (sub !== undefined) loadingStatus(stepDefs[i][1], sub);
   };
+  // v1.9.9 — live diagnostic feed. EVERYTHING the injector says is rendered on the card
+  // (last lines, tiny mono strip) and kept in a ring buffer; on failure the whole story is
+  // copied to the clipboard automatically. A screenshot of the card = a full diagnosis.
+  const diagRing = [];
+  const diag = (line) => {
+    try {
+      const stamp = new Date().toISOString().slice(11, 19);
+      diagRing.push(stamp + ' ' + line);
+      if (diagRing.length > 400) diagRing.shift();
+      writeLaunchDiag([line]);
+      sendLoading('diag', { line: stamp + '  ' + line });
+    } catch {}
+  };
   const fail = (i, title, detail, actions) => {
     setStep(i, 'failed');
-    sendLoading('error', { title, detail, actions: actions || [{ id: 'retry', label: 'Retry' }, { id: 'cancel', label: 'Cancel' }] });
+    const diagText = 'GTAMP v' + LAUNCHER_VER + ' — connect failure: ' + title + '\n' + (detail || '') +
+      '\n\n---- diagnostics (chronological) ----\n' + diagRing.join('\n') + '\n';
+    try { clipboard.writeText(diagText); } catch {}
+    writeLaunchDiag(['FAIL: ' + title, detail || '']);
+    diag('FAILED: ' + title);
+    const note = '\n\n— full diagnostics copied to your clipboard (Ctrl+V to share)\n— log: %TEMP%\\gtamp_status.txt';
+    sendLoading('error', { title, detail: (detail || '') + note, actions: actions || [{ id: 'retry', label: 'Retry' }, { id: 'cancel', label: 'Cancel' }] });
     try { hookBroadcast({ t: 'joinFail', msg: title }); } catch {}
   };
 
@@ -1475,6 +1519,19 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
 
   // STEP 6 — launch GTA (or reuse a running one, FiveM -switchcl style)
   setStep(6, 'active', launch.note || '');
+  // v1.9.9 — preflight: prove Windows will actually RUN gtamp_injector.exe before we invest
+  // minutes in waits. If antivirus/SmartScreen blocks the exe, fail NOW (seconds), not silently.
+  {
+    const pf = preflightInjector();
+    if (ctl.cancelled) return;
+    if (pf.blocked) {
+      fail(6, 'Windows blocked the GTAMP injector',
+        'gtamp_injector.exe could not start: ' + pf.blocked + '\n\nWindows SmartScreen or your antivirus is stopping it.\n1) Windows Security > Virus & threat protection > Exclusions > add the folder this exe is in.\n2) Right-click the GTAMP exe > Properties > tick Unblock if shown.\n3) Press Retry.',
+        [{ id: 'retry', label: 'Retry' }, { id: 'cancel', label: 'Cancel' }]);
+      return;
+    }
+    writeLaunchDiag(['preflight injector probe: ' + pf.summary]);
+  }
   let reusedGame = false;
   if (gtaRunning()) {
     reusedGame = true;
@@ -1505,16 +1562,28 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
   // memory pressure those spawns throw or time out, making GTA5.exe "invisible" and wedging the
   // card at "waiting for game window" even with the game open. The injector waits natively
   // (Toolhelp32 snapshot, zero shell) and streams stage lines; we just render them.
-  setStep(7, 'active', 'The game can take a minute to appear…');
-  const pidWaitMs = (launch.injectWaitMs || 90000) + 60000;
-  const windowCap = Math.max(30000, parseInt(process.env.GTAMP_WINDOW_MS || '120000', 10) || 120000);
+  setStep(7, 'active', 'Waiting for GTA5.exe (native watcher — no shell spawns)');
+  const pidWaitMs = (launch.injectWaitMs || 180000) + 60000; // v1.9.9 — 4 min: slow Rockstar sign-in/update gets time
+  const windowCap = Math.max(30000, parseInt(process.env.GTAMP_WINDOW_MS || '60000', 10) || 60000); // v1.9.9 — blind-inject after 60s (was 120s)
   const t0 = Date.now();
   let injectorOutcome = null;
   let stage8Armed = false;
   let procLineShown = false;
   let lastUiTick = 0;
+  let lastInjectorLine = Date.now();
+  let silenceWarned = false;
   const onStage = (line) => {
-    if (line.startsWith('stage:process-found')) {
+    lastInjectorLine = Date.now();
+    diag('injector: ' + line); // v1.9.9 — raw feed straight onto the card
+    if (line.startsWith('stage:waiting-pid')) {
+      const m = line.match(/sec=(\d+)/);
+      loadingStatus('WAITING FOR GAME WINDOW', 'Waiting for GTA5.exe… (' + (m ? m[1] : '0') + 's) — if Rockstar/Steam is asking you something behind this window, answer it');
+    } else if (line.startsWith('stage:waiting-window-titles')) {
+      // raw window titles the injector can see — proves what Windows shows us (ENB/hidden/elevated diagnosis)
+    } else if (line.startsWith('stage:waiting-window')) {
+      const m = line.match(/sec=(\d+)/);
+      setStep(7, 'active', 'GTA5.exe is running — waiting for its window (' + (m ? m[1] : '?') + 's; injecting anyway at ' + Math.round(windowCap / 1000) + 's)');
+    } else if (line.startsWith('stage:process-found')) {
       const m = line.match(/pid=(\d+)/);
       setStep(7, 'active', 'Game process found' + (m ? ' (pid ' + m[1] + ')' : '') + ' — waiting for the game window…');
       procLineShown = true;
@@ -1524,7 +1593,7 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
       setStep(8, 'active', 'Letting the game render its first frames…');
       stage8Armed = true;
     } else if (line.startsWith('stage:window-timeout')) {
-      // v1.9.5 — window never matched (odd title / store wrapper); NOT fatal, injector proceeds blind
+      // window never matched (odd title / fullscreen) — NOT fatal, injector proceeds blind
       ctl.event('windowFound');
       setStep(7, 'done', 'window not detected — game is running, injecting anyway');
       setStep(8, 'active', 'Settling before injection…');
@@ -1532,14 +1601,22 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
     } else if (line.startsWith('stage:settling')) {
       if (!stage8Armed) { setStep(7, 'done'); setStep(8, 'active', 'Settling before injection…'); }
       loadingStatus('PREPARING INJECTION', 'The game is rendering normally — injecting in a few seconds…');
-    } else if (line === 'stage:injected') {
-      injectorOutcome = { ok: true };
+    } else if (line.startsWith('stage:injected')) { // v1.9.9 — real line is "stage:injected pid=N loadRc=N", startswith not ===
+      if (!injectorOutcome) injectorOutcome = { ok: true };
       ctl.event('injected');
+    } else if (line.startsWith('stage:injector-exit')) {
+      // v1.9.9 — exit code is a FALLBACK outcome only; precise stdout errors win
+      if (!injectorOutcome) {
+        const m = line.match(/code=(-?\d+)/);
+        const c = m ? parseInt(m[1], 10) : -1;
+        injectorOutcome = c === 0 ? { ok: true } : { ok: false, code: 'injector-exit-' + c };
+      }
     } else if (line.startsWith('error:')) {
-      injectorOutcome = { ok: false, code: line.slice(6) };
+      if (!injectorOutcome) injectorOutcome = { ok: false, code: line.slice(6) };
     }
   };
-  writeLaunchDiag(['native injector owns process+window wait (waitPid, blind-safe), alreadyRunning=' + reusedGame + ', pidWaitMs=' + pidWaitMs + ', windowCap=' + windowCap]);
+  writeLaunchDiag(['v1.9.9 native injector owns process+window wait (heartbeats every 5s), alreadyRunning=' + reusedGame + ', pidWaitMs=' + pidWaitMs + ', windowCap=' + windowCap]);
+  diag('launch: spawning injector — watch this feed: every 5s a heartbeat MUST appear below');
   const injRes = runInjector({ waitPid: true, pidTimeoutMs: pidWaitMs, waitWindow: true, alreadyRunning: reusedGame, settleMs: Math.max(1000, parseInt(process.env.GTAMP_SETTLE_MS || '6000', 10) || 6000), timeoutMs: windowCap }, onStage);
   if (!injRes.ok) { fail(9, 'Injection failed', injRes.error || 'unknown'); return; }
 
@@ -1550,33 +1627,55 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
     const outcomeBudget = (reusedGame ? windowCap : pidWaitMs + windowCap) + 60000;
     while (!injectorOutcome && !ctl.events['hookHello'] && Date.now() - t2 < outcomeBudget) {
       if (ctl.cancelled) return;
+      // v1.9.9 — the injector heartbeats every 5s while it waits; 25s of silence = it never
+      // started (antivirus / SmartScreen swallowed it; exit code will still arrive, so warn only)
+      if (!silenceWarned && Date.now() - lastInjectorLine > 25000) {
+        silenceWarned = true;
+        diag('WARNING: injector silent for 25s — gtamp_injector.exe may be blocked by security software');
+        loadingStatus('WAITING FOR GAME WINDOW', 'The injector went silent — check antivirus/SmartScreen for gtamp_injector.exe');
+      }
       if (!procLineShown && Date.now() - lastUiTick >= 2000) { // pure-timer countdown, no shell
         lastUiTick = Date.now();
         const left = Math.max(0, Math.ceil((pidWaitMs - (Date.now() - t0)) / 1000));
-        loadingStatus('WAITING FOR GAME WINDOW', 'Game process — up to ' + left + 's remaining');
+        loadingStatus('WAITING FOR GAME WINDOW', 'Waiting for GTA5.exe… up to ' + left + 's — if Rockstar/Steam is asking you something behind this window, answer it');
       }
       await sleep(400);
     }
-    // v1.9.4 — if the HOOK reported in, the DLL is in no matter what stdout said
+    // if the HOOK reported in, the DLL is in no matter what stdout said
     if (!injectorOutcome && ctl.events['hookHello']) injectorOutcome = { ok: true, via: 'hookHello' };
   }
   if (ctl.cancelled) return;
   if (!injectorOutcome || !injectorOutcome.ok) {
     const code = injectorOutcome && injectorOutcome.code;
-    if (code && code.indexOf('process-timeout') === 0) {
-      fail(7, 'GTA5.exe never appeared',
-        'The game process never showed up. GTA V may still be loading — check Rockstar/Steam for a started game.\n\nRetry after the game fully opens, or start GTA V yourself into story mode and press Retry Inject.',
-        [{ id: 'retryInject', label: 'Retry Inject' }, { id: 'cancel', label: 'Cancel' }]);
+    diag('injector outcome: FAILED ' + (code || '(no outcome at all — budget exhausted)'));
+    if (code && code.indexOf('access-denied') === 0) {
+      // v1.9.9 — elevated game, non-elevated launcher: fast, exact card (this used to look like "stuck forever")
+      fail(8, 'GTA V is running as Administrator',
+        'Windows refused to let GTAMP open the game process (access denied) — GTA V (or Rockstar Launcher) is running ELEVATED and GTAMP is not.\n\nPress RESTART AS ADMINISTRATOR: GTAMP closes, relaunches itself with admin rights (one UAC prompt), then press Connect again.',
+        [{ id: 'relaunchAdmin', label: 'Restart as Administrator' }, { id: 'cancel', label: 'Cancel' }]);
       return;
     }
-    if (code === 'process-exited') {
+    if (code && code.indexOf('process-timeout') === 0) {
+      fail(7, 'GTA5.exe never appeared',
+        'The game process never showed up in ' + Math.round(pidWaitMs / 1000) + 's.\n\nMost likely: Rockstar Games Launcher or Steam is waiting for YOU (sign-in, update, or a dialog BEHIND this window). Check the taskbar, finish any Rockstar/Steam prompt until the game actually launches, then press Retry.\n\nOr start GTA V yourself into story mode first, then press Connect — GTAMP will switch straight in.',
+        [{ id: 'retry', label: 'Retry' }, { id: 'cancel', label: 'Cancel' }]);
+      return;
+    }
+    if (code === 'process-exited' || (code && code.indexOf('process-exited') === 0)) {
       fail(7, 'GTA V exited unexpectedly',
         'The game closed during startup (Rockstar reports this in its "exited unexpectedly" dialog).\n\n1) Click OK in the Rockstar dialog if one is open.\n2) Press Retry here — GTAMP re-launches the game.\nIf it repeats: Safe Mode once (Rockstar dialog button) restores vanilla graphics, then Retry. Update GPU drivers and close overlays (ShadowPlay/Discord/Afterburner) only if it keeps happening.',
         [{ id: 'retry', label: 'Retry' }, { id: 'cancel', label: 'Cancel' }]);
       return;
     }
+    if (code && (code.indexOf('inject-failed') === 0 || code.indexOf('injector-exit-') === 0 || code.indexOf('no-dll') === 0)) {
+      // v1.9.9 — REAL injection-failure card (was wrongly shown as "game window never appeared")
+      fail(9, 'Injection failed',
+        'The hook could not be loaded into GTA V (' + code + ').\n\nMost common cause: antivirus blocked gtamp_hook.dll or gtamp_injector.exe — add this launcher\'s folder to antivirus exclusions, then Retry Inject.\n\nIf GTA V is running as administrator, use Restart as Administrator instead.',
+        [{ id: 'retryInject', label: 'Retry Inject' }, { id: 'relaunchAdmin', label: 'Restart as Administrator' }, { id: 'cancel', label: 'Cancel' }]);
+      return;
+    }
     fail(8, 'Game window never appeared',
-      'GTA V started but never finished graphics init (e.g. ERR_GFX_D3D_INIT).\n\nGTAMP forced DirectX 11 in settings.xml and paused ShadowPlay. On your earlier screenshot GTAMP also spotted an ENB/ReShade installation — those custom d3d11.dll overlays are a top cause of ERR_GFX_D3D_INIT. Remove/pause ENB (enbdev) or ReShade from the GTA folder, reboot once, then Retry. Also check GPU drivers and close Discord/Afterburner overlays.',
+      'GTA V started but never finished graphics init (e.g. ERR_GFX_D3D_INIT).\n\nGTAMP forced DirectX 11 in settings.xml and paused ShadowPlay. If you run ENB/ReShade from the GTA folder, remove or pause it once (those custom d3d11.dll overlays are a top cause of ERR_GFX_D3D_INIT), reboot, then Retry. Also check GPU drivers and close Discord/Afterburner overlays.',
       [{ id: 'retry', label: 'Retry' }, { id: 'cancel', label: 'Cancel' }]);
     return;
   }
@@ -1955,7 +2054,9 @@ function runInjector(opts, onStage) {
     injectorProc.on('error', e => writeLaunchDiag(['injector process error: ' + e.message]));
     // v1.9.4 — never let stdout parsing be the only signal: injector EXITING is also an outcome.
     injectorProc.on('exit', (code) => {
-      try { if (onStage) onStage(code === 0 ? 'stage:injected' : 'error:inject-failed exit=' + code); } catch {}
+      // v1.9.9 — distinguishable synthetic line; the connect flow treats it as a FALLBACK
+      // outcome only, so precise stdout errors (process-timeout / access-denied) are never overwritten
+      try { if (onStage) onStage('stage:injector-exit code=' + code); } catch {}
     });
     writeLaunchDiag(['spawning injector (attempt ' + injectAttempt + ', waitWindow=' + !!opts.waitWindow + ')', injPath, dllPath]);
     return { ok:true, injector: injPath, dll: dllPath, attempt: injectAttempt };

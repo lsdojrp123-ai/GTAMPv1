@@ -94,6 +94,16 @@ static HWND findWindowForPid(DWORD pid, wchar_t* titlesOut = NULL, HWND* softOut
     return c.hwnd;
 }
 
+// v1.9.9 — can we actually open the process for injection? (elevated game from a
+// non-elevated launcher = ACCESS_DENIED; fail fast with a clear error instead of
+// burning the whole window wait and dying at CreateRemoteThread minutes later)
+static bool canOpenForInject(DWORD pid) {
+    HANDLE h = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
+                           PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ, FALSE, pid);
+    if (h) { CloseHandle(h); return true; }
+    return GetLastError() != ERROR_ACCESS_DENIED; // transient errors: keep trying
+}
+
 static DWORD WINAPI winMainThunk(LPVOID) { return 0; }
 
 int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, wchar_t* cmd, int) {
@@ -117,13 +127,13 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, wchar_t* cmd, int) {
         }
         LocalFree(argv);
     }
-    dbg(L"GTAMP injector 1.9.8 pid=%lu dlloverride=%d waitpid=%d waitwindow=%d alreadyrunning=%d settle=%lums timeout=%lums dll=[%s]",
+    dbg(L"GTAMP injector 1.9.9 pid=%lu dlloverride=%d waitpid=%d waitwindow=%d alreadyrunning=%d settle=%lums timeout=%lums dll=[%s]",
         pid, dlloverride ? 1 : 0, waitPid ? 1 : 0, waitWindow ? 1 : 0, alreadyRunning ? 1 : 0, settleMs, waitMs, dll);
 
     // --probe: instant process check, no injection and no --dll required (v1.9.8 native gtaRunning)
     if (argFlag(L"--probe")) {
         DWORD p = pid ? pid : findPid(process);
-        if (p && processAlive(p)) { stage(L"stage:process-found pid=%lu", p); return 0; }
+        if (p && processAlive(p)) { stage(L"stage:process-found pid=%lu%s", p, canOpenForInject(p) ? L"" : L" elevated=1"); return 0; }
         stage(L"error:process-timeout %s", process);
         return 1;
     }
@@ -138,11 +148,19 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, wchar_t* cmd, int) {
             pid = findPid(process);
             if (pid) break;
             if (!waitPid || GetTickCount64() >= deadline) { stage(L"error:process-timeout %s", process); return 1; }
-            if ((++ptick % 20) == 0) dbg(L"still waiting for process %s …", process);
+            if ((++ptick % 10) == 0) stage(L"stage:waiting-pid sec=%lu", (DWORD)(ptick / 2));
             Sleep(500);
         }
     }
     stage(L"stage:process-found pid=%lu", pid);
+
+    // v1.9.9 — elevation/access pre-check: if we can never open the process for injection
+    // (game running as admin, launcher not), say so in seconds, not after the window wait
+    if (!alreadyRunning) {
+        bool openOk = false;
+        for (int t = 0; t < 6 && !openOk; t++) { openOk = canOpenForInject(pid); if (!openOk) Sleep(500); }
+        if (!openOk && !canOpenForInject(pid)) { stage(L"error:access-denied pid=%lu", pid); return 5; }
+    }
 
     // 2) window wait (FiveM-parity settled-D3D gate) — skipped for reused instances
     bool windowOk = false;
@@ -162,7 +180,11 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, wchar_t* cmd, int) {
                 windowOk = true;
                 break;
             }
-            if ((++tick % 20) == 0) dbg(L"waiting for window of pid=%lu … candidates:%s", pid, titles[0] ? titles : L"(none)");
+            if ((++tick % 10) == 0) stage(L"stage:waiting-window sec=%lu", (DWORD)(tick / 2));
+            if ((tick % 40) == 0) { // include the raw window titles we can see — catches ENB/UIPI-hidden windows in one screenshot
+                wchar_t slim[160]; slim[0] = 0; wcsncat(slim, titles[0] ? titles : L"(none)", 150);
+                stage(L"stage:waiting-window-titles pid=%lu%s", pid, slim);
+            }
             if (GetTickCount64() >= deadline) {
                 dbg(L"window wait timed out — proceeding blind. final candidates:%s", titles[0] ? titles : L"(none)");
                 stage(L"stage:window-timeout pid=%lu", pid);

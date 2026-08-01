@@ -57,6 +57,7 @@ contextBridge.exposeInMainWorld('gtamp', {
     onStatus: (cb) => ipcRenderer.on('loading:status', (_e, d) => cb(d)),
     onSteps: (cb) => ipcRenderer.on('loading:steps', (_e, d) => cb(d)),
     onError: (cb) => ipcRenderer.on('loading:error', (_e, d) => cb(d)),
+    onDiag: (cb) => ipcRenderer.on('loading:diag', (_e, d) => cb(d)),
     action: (id) => ipcRenderer.send('loading:action', id)
   },
   on: (channel, cb) => {
