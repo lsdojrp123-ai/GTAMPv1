@@ -819,7 +819,7 @@ function verifyGtaOwnership(dir) {
 }
 
 // ---------- Loading window: startup splash + server connect (v1.7.0) ----------
-const LAUNCHER_VER = '1.9.2';
+const LAUNCHER_VER = '1.9.3';
 function openLoading(mode, opts = {}) {
   closeLoading();
   loadingWin = new BrowserWindow({
@@ -1169,37 +1169,6 @@ function checkComponentUpdates() {
   });
 }
 
-async function waitForGtaWindow(maxMs, ctl, statusFn) {
-  // The ERR_GFX_D3D_INIT fix hinges on this: FiveM loads the game inside its own process and only
-  // surfaces once D3D is fully initialised. We mirror that contract: NO injection until GTA has
-  // created its real window (== device created & past gfx init), then a settle grace.
-  const t0 = Date.now();
-  let deadStreak = 0;
-  while (Date.now() - t0 < maxMs) {
-    if (ctl && ctl.cancelled) return false;
-    // v1.9.1 — notice the game DYING mid-wait (Rockstar shows "exited unexpectedly") instead of
-    // sitting here for the full timeout while a crash dialog waits for user input.
-    if (!gtaRunning()) {
-      deadStreak++;
-      if (Date.now() - t0 > 12000 && deadStreak >= 2) return -1;
-    } else {
-      deadStreak = 0;
-    }
-    try {
-      const ps = '(Get-Process -Name GTA5,GTA5_Enhanced -ErrorAction SilentlyContinue | Where-Object {$_.MainWindowHandle -ne 0}).Id -join ","';
-      const out = require('child_process').execSync('powershell -NoProfile -Command "' + ps + '"', { windowsHide: true, timeout: 8000 }).toString().trim();
-      const pid = parseInt(out.split(',')[0], 10);
-      if (pid > 0) return pid;
-    } catch {}
-    if (statusFn) {
-      const left = Math.ceil((maxMs - (Date.now() - t0)) / 1000);
-      statusFn('Waiting for the game window… up to ' + left + 's (compiling shaders / loading story world)');
-    }
-    await new Promise(r => setTimeout(r, 2000));
-  }
-  return 0;
-}
-
 async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
   const serverName = serverAddr || 'GTAMP Official #1';
   if (connectCtl) { const old = connectCtl; connectCtl = null; try { await old.cancel(true); } catch {} }
@@ -1386,44 +1355,65 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
       [{ id: 'retryInject', label: 'Retry Inject' }, { id: 'cancel', label: 'Cancel' }]);
     return;
   }
-  setStep(7, 'active', 'Process found — waiting for the game window (graphics init)…');
-  const wPid = await waitForGtaWindow(240000, ctl, (s) => loadingStatus('WAITING FOR GAME WINDOW', s));
-  if (ctl.cancelled) return;
-  if (wPid === -1) {
-    fail(7, 'GTA V exited unexpectedly',
-      'The game closed during startup (Rockstar reports this in its "exited unexpectedly" dialog).\n\n1) Click OK in the Rockstar dialog if one is open.\n2) Press Retry here — GTAMP re-launches the game.\nIf it repeats: Safe Mode once (Rockstar dialog button) restores vanilla graphics, then Retry. Update GPU drivers and close overlays (ShadowPlay/Discord/Afterburner) only if it keeps happening.',
-      [{ id: 'retry', label: 'Retry' }, { id: 'cancel', label: 'Cancel' }]);
-    return;
-  }
-  if (!wPid) {
-    fail(7, 'Game window never appeared',
-      'GTA V started but never finished graphics init (e.g. ERR_GFX_D3D_INIT).\n\nGTAMP already forced DirectX 11 in settings.xml and paused ShadowPlay for this session. Still failing usually means: outdated GPU drivers (run the DirectX installer in your GTA folder), or an overlay conflict — close GeForce ShadowPlay / Discord overlay / MSI Afterburner + RivaTuner, reboot once, then Retry.',
-      [{ id: 'retry', label: 'Retry' }, { id: 'cancel', label: 'Cancel' }]);
-    return;
-  }
-  setStep(7, 'done', 'game window up (D3D ready)');
+  // STEP 7..9 — the INJECTOR natively waits window → settle → inject and streams stage lines
+  // (v1.9.3: replaces the PowerShell-polling storm that spiked commit memory / WerFault 0xc000012d)
+  setStep(7, 'active', 'Waiting for the game window (graphics init)…');
+  let injectorOutcome = null;
+  let stage8Armed = false;
+  const onStage = (line) => {
+    if (line.startsWith('stage:window-found')) {
+      ctl.event('windowFound');
+      setStep(7, 'done', 'game window up (D3D ready)');
+      setStep(8, 'active', 'Letting the game render its first frames…');
+      stage8Armed = true;
+    } else if (line.startsWith('stage:settling')) {
+      if (!stage8Armed) { setStep(7, 'done'); }
+      loadingStatus('PREPARING INJECTION', 'The game is rendering normally — injecting in a few seconds…');
+    } else if (line === 'stage:injected') {
+      injectorOutcome = { ok: true };
+      ctl.event('injected');
+    } else if (line === 'error:process-exited') {
+      injectorOutcome = { ok: false, code: 'process-exited' };
+      ctl.event('injectDone');
+    } else if (line === 'error:window-timeout') {
+      injectorOutcome = { ok: false, code: 'window-timeout' };
+      ctl.event('injectDone');
+    } else if (line === 'error:inject-failed') {
+      injectorOutcome = { ok: false, code: 'inject-failed' };
+      ctl.event('injectDone');
+    }
+  };
+  writeLaunchDiag(['game process found — native injector takes over (window wait → settle → inject)']);
+  const injRes = runInjector({ waitWindow: true, settleMs: Math.max(1000, parseInt(process.env.GTAMP_SETTLE_MS || '6000', 10) || 6000), timeoutMs: 240000 }, onStage);
+  if (!injRes.ok) { fail(9, 'Injection failed', injRes.error || 'unknown'); return; }
 
-  // STEP 8 — settle grace before touching the process (FiveM surfaces only after D3D is fully up)
-  setStep(8, 'active', 'Letting the game render its first frames…');
+  // STEP 8 — wait until the injector reports injected / errored (its own timeout is 240s)
   {
-    const settleMs = Math.max(1000, parseInt(process.env.GTAMP_SETTLE_MS || '6000', 10) || 6000);
-    const st0 = Date.now();
-    while (Date.now() - st0 < settleMs) {
+    const t2 = Date.now();
+    while (!injectorOutcome && Date.now() - t2 < 245000) {
       if (ctl.cancelled) return;
-      const left = Math.ceil((settleMs - (Date.now() - st0)) / 1000);
-      loadingStatus('PREPARING INJECTION', 'Injecting in ' + left + 's — the game is rendering normally');
-      await sleep(500);
+      await sleep(400);
     }
   }
-  setStep(8, 'done');
-
-  // STEP 9 — inject
-  setStep(9, 'active', 'gtamp_hook.dll → GTA5.exe');
-  writeLaunchDiag(['game window confirmed — injecting GTAMP hook']);
-  const injRes = runInjector();
-  await sleep(1200);
   if (ctl.cancelled) return;
-  if (!injRes.ok) { fail(9, 'Injection failed', injRes.error || 'unknown'); return; }
+  if (!injectorOutcome || !injectorOutcome.ok) {
+    const code = injectorOutcome && injectorOutcome.code;
+    if (code === 'process-exited') {
+      fail(7, 'GTA V exited unexpectedly',
+        'The game closed during startup (Rockstar reports this in its "exited unexpectedly" dialog).\n\n1) Click OK in the Rockstar dialog if one is open.\n2) Press Retry here — GTAMP re-launches the game.\nIf it repeats: Safe Mode once (Rockstar dialog button) restores vanilla graphics, then Retry. Update GPU drivers and close overlays (ShadowPlay/Discord/Afterburner) only if it keeps happening.',
+        [{ id: 'retry', label: 'Retry' }, { id: 'cancel', label: 'Cancel' }]);
+      return;
+    }
+    fail(8, 'Game window never appeared',
+      'GTA V started but never finished graphics init (e.g. ERR_GFX_D3D_INIT).\n\nGTAMP forced DirectX 11 in settings.xml and paused ShadowPlay. On your earlier screenshot GTAMP also spotted an ENB/ReShade installation — those custom d3d11.dll overlays are a top cause of ERR_GFX_D3D_INIT. Remove/pause ENB (enbdev) or ReShade from the GTA folder, reboot once, then Retry. Also check GPU drivers and close Discord/Afterburner overlays.',
+      [{ id: 'retry', label: 'Retry' }, { id: 'cancel', label: 'Cancel' }]);
+    return;
+  }
+  if (!stage8Armed) setStep(7, 'done', 'game window up (D3D ready)');
+  setStep(8, 'done');
+  if (!injectorOutcome.ok) { fail(9, 'Injection failed', 'injector reported failure'); return; }
+
+  // STEP 9 — inject confirmed by the injector itself
   setStep(9, 'done');
   // From here the game itself shows GTAMP's FiveM-style in-game connect panel
   try { hookBroadcast({ t: 'joinBegin', server: serverName }); } catch {}
@@ -1731,7 +1721,10 @@ function findNativeFile(file) {
   return null;
 }
 let injectAttempt = 0;
-function runInjector() {
+function runInjector(opts, onStage) {
+  // v1.9.3 — the INJECTOR natively waits for process → window → settle → inject and streams
+  // `stage:`/`error:` lines on stdout. No more PowerShell-per-2s polling (WerFault 0xc000012d).
+  opts = opts || {};
   const dllPath = findNativeFile('gtamp_hook.dll');
   const injPath = findNativeFile('gtamp_injector.exe');
   if (!dllPath || !injPath) {
@@ -1742,11 +1735,31 @@ function runInjector() {
   }
   injectAttempt++;
   try {
-    injectorProc = spawn(injPath, ['--process','GTA5.exe','--dll',dllPath,'--timeout','180000'],
-      { detached:true, stdio: isDev ? 'inherit' : 'ignore', windowsHide:true });
-    injectorProc.unref();
+    const args = ['--process','GTA5.exe','--dll',dllPath,'--timeout', String(opts.timeoutMs || 300000)];
+    if (opts.waitWindow) {
+      args.push('--wait-window');
+      args.push('--settle-ms', String(opts.settleMs || 6000));
+    }
+    injectorProc = spawn(injPath, args, { detached:false, stdio: ['ignore', onStage ? 'pipe' : 'ignore', 'pipe'], windowsHide:true });
+    if (onStage && injectorProc.stdout) {
+      let buf = '';
+      injectorProc.stdout.setEncoding('utf16le'); // stage() writes wide chars
+      injectorProc.stdout.on('data', (chunk) => {
+        buf += chunk;
+        const lines = buf.split(/\r?\n/);
+        buf = lines.pop();
+        for (const raw of lines) {
+          const l = raw.replace(/^ /, '').replace(/[^\x20-\x7E]/g, '').trim();
+          if (!l) continue;
+          writeLaunchDiag(['injector: ' + l]);
+          try { onStage(l); } catch {}
+        }
+      });
+    } else {
+      injectorProc.unref();
+    }
     injectorProc.on('error', e => writeLaunchDiag(['injector process error: ' + e.message]));
-    writeLaunchDiag(['spawning injector (attempt ' + injectAttempt + ')', injPath, dllPath]);
+    writeLaunchDiag(['spawning injector (attempt ' + injectAttempt + ', waitWindow=' + !!opts.waitWindow + ')', injPath, dllPath]);
     return { ok:true, injector: injPath, dll: dllPath, attempt: injectAttempt };
   } catch (e) {
     console.error('[Main] injector spawn error:', e);

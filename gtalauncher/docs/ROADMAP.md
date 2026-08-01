@@ -41,6 +41,10 @@
 - **T chat** in-game (FiveM keybinding); F9 toggles the debug HUD.
 - **Tray/background**: GTAMP keeps running in the tray while you play; quitting GTA returns you to the launcher; `disconnectSession` cleans the session from console/launcher.
 
+## v1.9.3 — hotfix: WerFault 0xc000012d (commit-limit pressure from PowerShell polling)
+- The "waiting for game window" stage spawned a fresh **PowerShell every 2 seconds** for up to 4 minutes (~120 processes, ~90–150 MB commit each) — on a system already loading GTA V (+ENB + browser tabs) that's exactly the pressure that makes even `WerFault.exe` fail with `STATUS_COMMITMENT_LIMIT (0xc000012d)`. v1.9.3 moves the entire window-wait → settle-grace → inject sequence **into the native injector** itself: it polls `EnumWindows`/`GetExitCodeProcess` in-process every 500 ms (a few MB total, zero extra processes) and streams `stage:`/`error:` lines on stdout (`--wait-window --settle-ms`), which the launcher parses to drive steps 7–9. Process-death-while-waiting (`error:process-exited`) and window-timeout face the same UI cards as before.
+- Window-timeout fail card now also calls out detected ENB/ReShade installs (custom `d3d11.dll` in the game folder = a top ERR_GFX_D3D_INIT cause; seen on the user's own screenshot).
+
 ## v1.9.2 — hotfix: startup hang + in-game "Unrecoverable fault"
 - **"Starting multiplayer services" hang**: FXServer UDP bind could await forever (ports held by a duplicate/zombie GTAMP instance). Now: bind error resolves degraded, splash has a hard 12s race, and the app enforces a **single-instance lock** (FiveM runs exactly one client process) — a second GTAMP just focuses the first.
 - **In-game "Unrecoverable fault"**: two v1.9.0 code paths could fault RAGE — (1) `SHUTDOWN_LOADING_SCREEN` called every 250ms through a story-mode load, now once/sec ×10 max; (2) D3D/DXGI pinning loaded DLLs **inside DllMain's loader lock** — moved to the SHV worker thread, exactly the constraint FiveM's `Main.cpp` preloads respect.

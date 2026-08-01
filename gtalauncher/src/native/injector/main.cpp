@@ -45,6 +45,46 @@ static void print(const wchar_t* msg) {
     OutputDebugStringW(msg);
 }
 
+// v1.9.3 — stage lines also go to STDOUT so the launcher can drive the connect UX without
+// polling PowerShell (the old per-2s PowerShell storm contributed to WerFault 0xc000012d).
+static void stage(const wchar_t* msg) {
+    print(msg);
+    wchar_t line[512];
+    swprintf(line, 512, L"%ls\n", msg);
+    DWORD written = 0;
+    WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), line, (DWORD)(wcslen(line) * sizeof(wchar_t)), &written, NULL);
+    fflush(stdout);
+}
+
+// Native window watch: find a VISIBLE, titled top-level window owned by pid.
+// Window existing == D3D init succeeded — the same contract FiveM keeps internally.
+struct WndCtx { DWORD pid; bool found; wchar_t title[160]; };
+static BOOL CALLBACK enumWndCb(HWND hwnd, LPARAM lp) {
+    WndCtx* c = (WndCtx*)lp;
+    DWORD wp = 0;
+    GetWindowThreadProcessId(hwnd, &wp);
+    if (wp == c->pid && IsWindowVisible(hwnd) && GetWindowTextLengthW(hwnd) > 0) {
+        c->found = true;
+        GetWindowTextW(hwnd, c->title, 159);
+        return FALSE;
+    }
+    return TRUE;
+}
+static bool findWindowForPid(DWORD pid, wchar_t* outTitle, int titleCap) {
+    WndCtx ctx; ctx.pid = pid; ctx.found = false; ctx.title[0] = 0;
+    EnumWindows(enumWndCb, (LPARAM)&ctx);
+    if (ctx.found && outTitle && titleCap > 0) wcsncpy_s(outTitle, titleCap, ctx.title, _TRUNCATE);
+    return ctx.found;
+}
+static bool processAlive(DWORD pid) {
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+    if (!h) return false;
+    DWORD code = STILL_ACTIVE;
+    BOOL ok = GetExitCodeProcess(h, &code);
+    CloseHandle(h);
+    return ok && code == STILL_ACTIVE;
+}
+
 static DWORD findProcess(const wchar_t* name) {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) return 0;
@@ -121,15 +161,19 @@ int wmain(int argc, wchar_t** argv) {
     const wchar_t* procName = L"GTA5.exe";
     const wchar_t* dllPath = NULL;
     int timeoutMs = 60000;
+    bool waitWindow = false;
+    int settleMs = 0;
 
     for (int i = 1; i < argc; i++) {
         if (wcscmp(argv[i], L"--process") == 0 && i+1 < argc) procName = argv[++i];
         else if (wcscmp(argv[i], L"--dll") == 0 && i+1 < argc) dllPath = argv[++i];
         else if (wcscmp(argv[i], L"--timeout") == 0 && i+1 < argc) timeoutMs = _wtoi(argv[++i]);
+        else if (wcscmp(argv[i], L"--wait-window") == 0) waitWindow = true;
+        else if (wcscmp(argv[i], L"--settle-ms") == 0 && i+1 < argc) settleMs = _wtoi(argv[++i]);
     }
 
     if (!dllPath) {
-        print(L"Usage: gtamp_injector.exe --process GTA5.exe --dll <path> [--timeout ms]");
+        print(L"Usage: gtamp_injector.exe --process GTA5.exe --dll <path> [--timeout ms] [--wait-window] [--settle-ms ms]");
         return 1;
     }
 
@@ -163,19 +207,45 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     if (!pid) {
-        print(L"Timed out waiting for target process");
+        stage(L"error:process-timeout");
         return 1;
     }
 
     {
         wchar_t buf[256];
-        swprintf(buf, 256, L"Found %s PID %u, injecting...", procName, pid);
-        print(buf);
+        swprintf(buf, 256, L"stage:process-found pid=%u", pid);
+        stage(buf);
     }
 
-    // Give GTA a few seconds to initialize (avoid early injection crashing)
-    Sleep(5000);
+    // v1.9.3 — window gating (FiveM's D3D contract): never touch the process before GTA renders.
+    if (waitWindow) {
+        bool got = false;
+        wchar_t title[160]; title[0] = 0;
+        int w2 = 0;
+        while (w2 < timeoutMs) {
+            if (!processAlive(pid)) { stage(L"error:process-exited"); return 3; }
+            if (findWindowForPid(pid, title, 160)) { got = true; break; }
+            Sleep(500);
+            w2 += 500;
+        }
+        if (!got) { stage(L"error:window-timeout"); return 2; }
+        {
+            wchar_t buf[384];
+            swprintf(buf, 384, L"stage:window-found pid=%u title=\"%ls\"", pid, title[0] ? title : L"?");
+            stage(buf);
+        }
+        if (settleMs > 0) {
+            wchar_t buf[128]; swprintf(buf, 128, L"stage:settling ms=%d", settleMs); stage(buf);
+            Sleep(settleMs);
+            if (!processAlive(pid)) { stage(L"error:process-exited"); return 3; }
+        }
+    } else {
+        // Legacy behavior: brief blind grace before injecting
+        Sleep(5000);
+    }
 
     bool ok = inject(pid, absDll);
+    if (ok) stage(L"stage:injected");
+    else stage(L"error:inject-failed");
     return ok ? 0 : 1;
 }
