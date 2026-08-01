@@ -51,7 +51,8 @@ function render(view, data, outName) {
       const up = depth === 0 ? './' : '../'.repeat(depth);
       const fixed = html.replace(/(href|action|src)=("|')(\/[^"']*)\2/g, (m, attr, q, p) => {
         if (p === '/') return attr + '=' + q + up + 'index.html' + q;
-        if (p.startsWith('/css/') || p.startsWith('/js/')) return attr + '=' + q + up + p.slice(1) + q;
+        if (p.startsWith('/css/') || p.startsWith('/js/') || p.startsWith('/img/')) return attr + '=' + q + up + p.slice(1) + q;
+        if (p.startsWith('http')) return m;
         if (p.startsWith('/download/')) return attr + '=' + q + up + p.replace('/download/', '') + q;
         if (p.startsWith('/artifacts/') || p.startsWith('/api/')) return attr + '=' + q + '#' + q;
         // POST form targets can't work in a static (file://) build — neutralize
@@ -87,6 +88,12 @@ function serverRow(s) {
   await render('run_server', { user: null, artifacts }, 'run-server.html');
   await render('login', { user: null, error: null }, 'login.html');
   await render('register', { user: null, error: null }, 'register.html');
+  const legalStatic = {
+    terms: { title: 'GTAMP License Agreement', body: `<p>By downloading or using GTAMP ("the software"), you agree to these terms.</p><p><b>1. License.</b> We grant you a personal, non-exclusive, non-transferable license to install and use GTAMP to play and host community multiplayer servers for Grand Theft Auto V.</p><p><b>2. Requirements.</b> You must own a legitimate PC copy of Grand Theft Auto V. GTAMP does not include, replace, or modify any game files.</p><p><b>3. Online conduct.</b> Server owners set their own rules. Cheating, harassment, and unlawful activity may get you banned from individual servers or the platform.</p><p><b>4. No affiliation.</b> GTAMP is not affiliated with, endorsed by, or connected to Rockstar Games, Take-Two Interactive, or Cfx.re.</p><p><b>5. Warranty.</b> GTAMP is provided "as is", without warranty of any kind. Use it at your own risk.</p>` },
+    privacy: { title: 'Privacy Policy', body: `<p>GTAMP collects the minimum data needed to run the platform.</p><p><b>Accounts.</b> If you register, we store your username and a hashed password. We never store plaintext passwords.</p><p><b>Play presence.</b> The GTAMP launcher periodically pings this website so we can show live "players online" counts and your server in the Server List. These reports contain no personal data beyond your server name and player count.</p><p><b>Cookies.</b> We use a single session cookie to keep you signed in. See the <a href="cookies.html">Cookie Policy</a> for details.</p><p><b>Sharing.</b> We do not sell or share your personal information with third parties.</p>` },
+    cookies: { title: 'Cookie Policy', body: `<p>GTAMP uses one strictly-necessary cookie:</p><p><b>Session cookie.</b> Keeps you signed in between page loads. It contains an opaque session ID, expires when you log out or after a period of inactivity, and is not used for tracking or advertising.</p><p><b>Cookie settings.</b> Because we only use this essential cookie, there is nothing to opt out of — if you block it, login simply won't persist. You can clear it any time from your browser settings.</p>` }
+  };
+  for (const [slug, doc] of Object.entries(legalStatic)) await render('legal', { user: null, title: doc.title, body: doc.body }, slug + '.html');
   await render('keymaster', {
     user: { id: 1, username: 'DemoUser' }, licenses: [{ key: 'GTAMP-DEMO-0001', type: 'server' }],
     assets: [{ id: 1, title: 'Realistic Car Pack', price: 12.99, published: true }]
@@ -105,8 +112,16 @@ function serverRow(s) {
   const pubDir = path.join(__dirname, '..', 'public');
   fs.mkdirSync(path.join(outDir, 'css'), { recursive: true });
   fs.mkdirSync(path.join(outDir, 'js'), { recursive: true });
-  fs.copyFileSync(path.join(pubDir, 'css', 'style.css'), path.join(outDir, 'css', 'style.css'));
+  // copy CSS with image URLs re-pointed relative to css/ for file:// use
+  let cssOut = fs.readFileSync(path.join(pubDir, 'css', 'style.css'), 'utf8');
+  cssOut = cssOut.replace(/url\("\/img\//g, 'url("../img/');
+  fs.writeFileSync(path.join(outDir, 'css', 'style.css'), cssOut);
   fs.copyFileSync(path.join(pubDir, 'js', 'main.js'), path.join(outDir, 'js', 'main.js'));
+  const imgDir = path.join(pubDir, 'img');
+  if (fs.existsSync(imgDir)) {
+    fs.mkdirSync(path.join(outDir, 'img'), { recursive: true });
+    for (const f of fs.readdirSync(imgDir)) fs.copyFileSync(path.join(imgDir, f), path.join(outDir, 'img', f));
+  }
   try {
     const exe = path.join(__dirname, '..', '..', 'GTAMP-Launcher-v1.6.0.exe');
     if (fs.existsSync(exe)) fs.copyFileSync(exe, path.join(outDir, 'GTAMP-Launcher-v1.6.0.exe'));

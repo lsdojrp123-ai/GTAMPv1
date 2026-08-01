@@ -275,6 +275,30 @@ app.get('/docs/:id', (req, res) => {
   res.render('doc', { user: publicUser(userById(req.session.uid)), settings: settings(), doc, docs: all });
 });
 
+// ---------- Legal pages ----------
+const legalDocs = {
+  terms: { title: 'GTAMP License Agreement', body: `
+    <p>By downloading or using GTAMP ("the software"), you agree to these terms.</p>
+    <p><b>1. License.</b> We grant you a personal, non-exclusive, non-transferable license to install and use GTAMP to play and host community multiplayer servers for Grand Theft Auto V.</p>
+    <p><b>2. Requirements.</b> You must own a legitimate PC copy of Grand Theft Auto V. GTAMP does not include, replace, or modify any game files.</p>
+    <p><b>3. Online conduct.</b> Server owners set their own rules. Cheating, harassment, and unlawful activity may get you banned from individual servers or the platform.</p>
+    <p><b>4. No affiliation.</b> GTAMP is not affiliated with, endorsed by, or connected to Rockstar Games, Take-Two Interactive, or Cfx.re.</p>
+    <p><b>5. Warranty.</b> GTAMP is provided "as is", without warranty of any kind. Use it at your own risk.</p>` },
+  privacy: { title: 'Privacy Policy', body: `
+    <p>GTAMP collects the minimum data needed to run the platform.</p>
+    <p><b>Accounts.</b> If you register, we store your username and a hashed password. We never store plaintext passwords.</p>
+    <p><b>Play presence.</b> The GTAMP launcher periodically pings this website so we can show live "players online" counts and your server in the Server List. These reports contain no personal data beyond your server name and player count.</p>
+    <p><b>Cookies.</b> We use a single session cookie to keep you signed in. See the <a href="/cookies">Cookie Policy</a> for details.</p>
+    <p><b>Sharing.</b> We do not sell or share your personal information with third parties.</p>` },
+  cookies: { title: 'Cookie Policy', body: `
+    <p>GTAMP uses one strictly-necessary cookie:</p>
+    <p><b>Session cookie.</b> Keeps you signed in between page loads. It contains an opaque session ID, expires when you log out or after a period of inactivity, and is not used for tracking or advertising.</p>
+    <p><b>Cookie settings.</b> Because we only use this essential cookie, there is nothing to opt out of — if you block it, login simply won't persist. You can clear it any time from your browser settings.</p>` }
+};
+for (const [slug, doc] of Object.entries(legalDocs)) {
+  app.get('/' + slug, (req, res) => res.render('legal', { user: publicUser(userById(req.session.uid)), settings: settings(), title: doc.title, body: doc.body }));
+}
+
 // ---------- Run your own server ----------
 app.get('/run-server', (req, res) => {
   res.render('run_server', { user: publicUser(userById(req.session.uid)), settings: settings(), artifacts: store.load('artifacts', []) });

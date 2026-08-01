@@ -10,22 +10,37 @@
 <link rel="stylesheet" href="./css/style.css">
 </head>
 <body>
+<div class="container"><div class="spacer">
 <header>
-  <div class="bar">
-    <a href="./index.html" class="logo"><span class="logo-img">G</span><span class="logo-title">GTAMP</span></a>
-    <ul class="links">
+  <div class="hbar">
+    <a href="./index.html" class="logo">
+      <svg class="logo-img" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 1 L29 8.5 V23.5 L16 31 L3 23.5 V8.5 Z" fill="#f40552"/><path d="M11 21.5 V10.5 h7.2 c2.6 0 4.3 1.5 4.3 3.9 0 1.6-.8 2.8-2.1 3.4 L23 21.5 h-3.4 l-2.2-3.4 H14 v3.4 Z M14 13.2 v2.2 h4 c1 0 1.6-.5 1.6-1.1 s-.6-1.1-1.6-1.1 Z" fill="#fff"/></svg>
+      <span class="logo-title">GTAMP</span>
+    </a>
+    <div class="burger-toggle" id="burger-open"><span class="material-icons-outlined">menu</span></div>
+    <ul class="links hidden-xs hidden-sm hidden-md">
       <li><a href="./servers.html" class="">Server List</a></li>
       <li><a href="./support.html" class="">Support</a></li>
       <li><a href="./keymaster.html" class="">Portal</a></li>
       <li><a href="./forum.html" class="">Forum</a></li>
       <li><a href="./marketplace.html" class="">Marketplace</a></li>
       <li><a href="./docs.html" class="">Documentation</a></li>
-      
-        <li><a href="./login.html">Login</a></li>
-      
     </ul>
   </div>
 </header>
+<div class="burger-links" id="burger-menu">
+  <ul class="links">
+    <li><a href="./servers.html">Server List</a></li>
+    <li><a href="./support.html">Support</a></li>
+    <li><a href="./keymaster.html">Portal</a></li>
+    <li><a href="./forum.html">Forum</a></li>
+    <li><a href="./marketplace.html">Marketplace</a></li>
+    <li><a href="./docs.html">Documentation</a></li>
+    
+  </ul>
+  <div class="close" id="burger-close"><span class="material-icons-outlined">close</span></div>
+</div>
+</div></div>
 
 <div class="dc-page">
   <h1 class="dc-title">Categories</h1>
@@ -150,35 +165,45 @@
   </div>
 </div>
 <footer>
-  <div class="wrap">
-    <div class="cols">
-      <div style="flex:2;min-width:220px">
-        <a href="./index.html" class="logo" style="margin-bottom:10px"><span class="logo-img">G</span><span class="logo-title">GTAMP</span></a>
-        <p class="muted" style="max-width:320px;font-size:var(--fs08)">Multiplayer-enabled modification framework for Grand Theft Auto V — our own code.</p>
-      </div>
-      <div>
-        <h4>Product</h4>
-        <a href="./index.html">Home</a>
-        <a href="./servers.html">Server List</a>
-        <a href="./GTAMP-Launcher-v1.6.0.exe">Download</a>
-        <a href="./run-server.html">Run your own server</a>
-      </div>
-      <div>
-        <h4>Community</h4>
-        <a href="./forum.html">Forum</a>
-        <a href="./marketplace.html">Marketplace</a>
-        <a href="./docs.html">Documentation</a>
-        <a href="./support.html">Support</a>
-      </div>
-      <div>
-        <h4>Account</h4>
-        <a href="./login.html">Login</a><a href="./register.html">Register</a>
-      </div>
+  <div class="container"><div class="spacer">
+    <div class="legal-links platform-links">
+      <div><a href="https://github.com/lsdojrp123-ai/GTAMPv1">GitHub</a></div>
+      <div class="footer-bullet">•</div>
+      <div><a href="./support.html">Support</a></div>
+      <div class="footer-bullet">•</div>
+      <div><a href="./keymaster.html">Portal</a></div>
+      <div class="footer-bullet">•</div>
+      <div><a href="./forum.html">Forum</a></div>
+      <div class="footer-bullet">•</div>
+      <div><a href="./marketplace.html">Marketplace</a></div>
+      <div class="footer-bullet">•</div>
+      <div><a href="./docs.html">Docs</a></div>
     </div>
-    <div class="copyright">GTAMP — not affiliated with Rockstar Games, Take-Two Interactive, or Cfx.re (FiveM).</div>
-  </div>
+    <div class="legal-links">
+      <div><a href="./terms.html">Terms of Service</a></div>
+      <div class="footer-bullet">•</div>
+      <div><a href="./privacy.html">Privacy</a></div>
+      <div class="footer-bullet">•</div>
+      <div><a href="./cookies.html">Cookie Policy</a></div>
+      <div class="footer-bullet">•</div>
+      <div><a href="./cookies.html">Cookie Settings</a></div>
+    </div>
+    <div class="copyright">Copyright © 2024–2026 GTAMP. Not affiliated with Rockstar Games, Take-Two Interactive, or Cfx.re.</div>
+  </div></div>
 </footer>
 <script src="./js/main.js"></script>
+<script>
+(function(){
+  var bo=document.getElementById('burger-open'),bm=document.getElementById('burger-menu'),bc=document.getElementById('burger-close');
+  if(bo&&bm){bo.addEventListener('click',function(){bm.classList.add('active');document.body.classList.add('disable-scroll')});}
+  if(bc&&bm){bc.addEventListener('click',function(){bm.classList.remove('active');document.body.classList.remove('disable-scroll')});}
+  var dl=document.getElementById('dl');
+  if(dl){dl.addEventListener('click',function(){
+    var s=document.getElementById('hero-seller'),t=document.getElementById('hero-thanks');
+    if(s&&t){s.classList.add('faded');t.classList.add('active');}
+  });}
+})();
+</script>
 </body>
 </html>
 
