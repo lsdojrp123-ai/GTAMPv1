@@ -78,17 +78,10 @@ function serverRow(s) {
 
 (async () => {
   await render('index', { user: null, liveCount: live().length, livePlayers: live().reduce((a, s) => a + s.players, 0) }, 'index.html');
-  await render('servers', { user: null }, 'servers.html');
-  {
-    const sp = path.join(outDir, 'servers.html');
-    let shtml = fs.readFileSync(sp, 'utf8');
-    const rows = live().map(serverRow).join('');
-    shtml = shtml.replace('<div id="server-list"><div class="muted">Loading servers...</div></div>',
-                          '<div id="server-list">' + rows + '</div>');
-    fs.writeFileSync(sp, shtml);
-  }
-  await render('forum', { user: null, cats, posts: samplePosts }, 'forum.html');
-  await render('marketplace', { user: null, assets: sampleAssets }, 'marketplace.html');
+  // servers page renders rows client-side from the baked window.__sample (works offline)
+  await render('servers', { user: null, sampleServers: live() }, 'servers.html');
+  await render('forum', { user: null, cats, posts: samplePosts, usersMap: { 1: { username: 'GTAMP_Team' }, 2: { username: 'ServerHost' }, 3: { username: 'Scripter' }, 4: { username: 'Community' } } }, 'forum.html');
+  await render('marketplace', { user: null, assets: sampleAssets, usersMap: { 1: { username: 'GTAMP_Team' }, 2: { username: 'Scripter' }, 3: { username: 'Mapper' } } }, 'marketplace.html');
   await render('docs', { user: null, docs }, 'docs.html');
   await render('support', { user: null }, 'support.html');
   await render('run_server', { user: null, artifacts }, 'run-server.html');
@@ -99,9 +92,13 @@ function serverRow(s) {
     assets: [{ id: 1, title: 'Realistic Car Pack', price: 12.99, published: true }]
   }, 'keymaster.html');
 
-  for (const d of docs) await render('doc', { user: null, doc: d }, 'docs/' + d.id + '.html');
-  for (const c of cats) await render('forum_cat', { user: null, cat: c, posts: samplePosts.filter(p => p.cat === c.id) }, 'forum/' + c.id + '.html');
-  for (const p of samplePosts) await render('thread', { user: null, post: p, replies: sampleReplies.filter(r => r.pid === p.id) }, 'forum/thread-' + p.id + '.html');
+  const sampleUsers = { 1: { username: 'GTAMP_Team' }, 2: { username: 'ServerHost' }, 3: { username: 'Scripter' }, 4: { username: 'Community' } };
+  const replyCounts = {};
+  sampleReplies.forEach(r => { replyCounts[r.pid] = (replyCounts[r.pid] || 0) + 1; });
+
+  for (const d of docs) await render('doc', { user: null, doc: d, docs, activeDoc: d }, 'docs/' + d.id + '.html');
+  for (const c of cats) await render('forum_cat', { user: null, cat: c, posts: samplePosts.filter(p => p.cat === c.id), usersMap: sampleUsers, replyCounts }, 'forum/' + c.id + '.html');
+  for (const p of samplePosts) await render('thread', { user: null, post: p, replies: sampleReplies.filter(r => r.pid === p.id), cat: cats.find(c => c.id === p.cat), usersMap: sampleUsers }, 'forum/thread-' + p.id + '.html');
   for (const s of live()) await render('server', { user: null, srv: s }, 'servers/' + s.id + '.html');
   for (const a of sampleAssets) await render('marketplace_item', { user: null, asset: a, author: { username: 'Author' } }, 'marketplace/' + a.id + '.html');
 

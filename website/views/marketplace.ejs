@@ -1,21 +1,32 @@
 <%- include('partials/head') %>
-<div class="wrap" style="padding:44px 24px">
-  <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:14px">
-    <div><h1 class="section-title" style="margin:0">Marketplace</h1>
-    <p class="section-sub" style="margin:6px 0 0">Buy and sell GTAMP assets.</p></div>
-    <% if (user) { %><a href="/keymaster" class="btn btn-accent">PUBLISH AN ASSET</a><% } %>
+<div class="mp-head">
+  <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:14px;flex-wrap:wrap">
+    <div>
+      <h1>Marketplace</h1>
+      <p>Scripts, vehicles, maps and more — made by the GTAMP community.</p>
+    </div>
+    <% if (user) { %><a href="/keymaster" class="btn btn-accent">Publish an asset</a><% } %>
   </div>
-  <div class="grid g3 mt" style="margin-top:26px">
-    <% if (!assets.length) { %><div class="muted">No assets published yet.</div><% } %>
-    <% assets.forEach(function(a){ %>
-      <div class="asset">
-        <h3 style="font-size:17px"><a href="/marketplace/<%= a.id %>"><%= a.title %></a></h3>
-        <p class="muted" style="flex:1"><%= a.desc %></p>
-        <div style="display:flex;align-items:center;justify-content:space-between">
-          <span class="<%= a.price>0?'price':'price free' %>"><%= a.price>0 ? '$'+a.price : 'FREE' %></span>
-          <span class="tag"><%= a.cat %></span>
+</div>
+<div class="mp-rail">
+  <% var pics = { car: '🚗', script: '📜', map: '🗺', weapon: '🔫', clothing: '👕', misc: '📦' }; %>
+  <% if (!assets.length) { %>
+    <div class="muted" style="padding:30px 0">No assets published yet. Be the first — publish from your <a href="/keymaster">Keymaster</a>.</div>
+  <% } %>
+  <div class="mp-grid">
+    <% assets.forEach(function(a, i){
+      var seller = (typeof usersMap !== 'undefined' && usersMap && usersMap[a.ownerId]) ? usersMap[a.ownerId].username : (a.author || 'Creator');
+    %>
+      <div class="mp-card" onclick="location.href='/marketplace/<%= a.id %>'" style="cursor:pointer">
+        <div class="mp-pic p<%= (i % 6) + 1 %>"><%= pics[a.cat] || '📦' %></div>
+        <div class="mp-info">
+          <div class="mp-name"><%= a.title %> <span class="vf" title="Verified publisher">✔</span></div>
+          <div class="mp-seller">by <%= seller %> · <span class="tag"><%= a.cat %></span></div>
+          <div class="mp-foot">
+            <span class="<%= a.price > 0 ? 'mp-price' : 'mp-price free' %>"><%= a.price > 0 ? '$' + Number(a.price).toFixed(2) : 'FREE' %></span>
+            <span class="mp-dl">⬇ <%= a.downloads || 0 %></span>
+          </div>
         </div>
-        <div class="muted" style="font-size:12px"><%= a.downloads||0 %> downloads</div>
       </div>
     <% }) %>
   </div>

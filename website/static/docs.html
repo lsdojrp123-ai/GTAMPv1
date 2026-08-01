@@ -27,47 +27,113 @@
   </div>
 </header>
 
-<div class="wrap" style="padding:44px 24px;max-width:900px">
-  <h1 class="section-title">Documentation</h1>
-  <p class="section-sub">How to run servers, script, and add resources.</p>
-  
-  
-    <div class="card mt">
-      <h3>Getting Started</h3>
-      <div class="mt" style="display:flex;flex-direction:column;gap:8px">
-        <a href="./docs/getstarted.html">Getting Started</a><a href="./docs/install.html">How to Install GTAMP</a>
-      </div>
+
+<div class="docs-layout">
+  <aside class="docs-nav">
+    <div class="docs-search">
+      <input type="text" id="docs-filter" placeholder="Filter documentation…" oninput="filterDocs(this.value)">
     </div>
-  
-    <div class="card mt">
-      <h3>Running a Server</h3>
-      <div class="mt" style="display:flex;flex-direction:column;gap:8px">
-        <a href="./docs/runserver.html">Run Your Own Server</a><a href="./docs/artifacts.html">Installing Artifacts</a><a href="./docs/resources.html">Adding Resources</a>
+    
+      <div class="navGroup">
+        <div class="navGroupTitle">Getting Started</div>
+        
+          <a class="docLink " href="./docs/getstarted.html">Getting Started</a>
+        
+          <a class="docLink " href="./docs/install.html">How to Install GTAMP</a>
+        
       </div>
-    </div>
-  
-    <div class="card mt">
-      <h3>Scripting</h3>
-      <div class="mt" style="display:flex;flex-direction:column;gap:8px">
-        <a href="./docs/scripting.html">Scripting Basics</a>
+    
+      <div class="navGroup">
+        <div class="navGroupTitle">Running a Server</div>
+        
+          <a class="docLink " href="./docs/runserver.html">Run Your Own Server</a>
+        
+          <a class="docLink " href="./docs/artifacts.html">Installing Artifacts</a>
+        
+          <a class="docLink " href="./docs/resources.html">Adding Resources</a>
+        
       </div>
-    </div>
-  
-    <div class="card mt">
-      <h3>Keymaster</h3>
-      <div class="mt" style="display:flex;flex-direction:column;gap:8px">
-        <a href="./docs/keymaster.html">Using the Keymaster</a>
+    
+      <div class="navGroup">
+        <div class="navGroupTitle">Scripting</div>
+        
+          <a class="docLink " href="./docs/scripting.html">Scripting Basics</a>
+        
       </div>
-    </div>
-  
-    <div class="card mt">
-      <h3>Support</h3>
-      <div class="mt" style="display:flex;flex-direction:column;gap:8px">
-        <a href="./docs/faq.html">FAQ</a>
+    
+      <div class="navGroup">
+        <div class="navGroupTitle">Keymaster</div>
+        
+          <a class="docLink " href="./docs/keymaster.html">Using the Keymaster</a>
+        
       </div>
-    </div>
-  
+    
+      <div class="navGroup">
+        <div class="navGroupTitle">Support</div>
+        
+          <a class="docLink " href="./docs/faq.html">FAQ</a>
+        
+      </div>
+    
+  </aside>
+  <main class="docs-content">
+    <h1>GTAMP Documentation</h1>
+    
+      <div class="section" data-cat="Getting Started">
+        <div class="sectionTitle">Getting Started</div>
+        
+          <p>📄 <a href="./docs/getstarted.html">Getting Started</a><br><span class="muted" style="font-size:var(--fs08)">Install, launch, and connect to your first server.</span></p>
+        
+          <p>📄 <a href="./docs/install.html">How to Install GTAMP</a><br><span class="muted" style="font-size:var(--fs08)">Download the launcher, install ScriptHookV, and run.</span></p>
+        
+      </div>
+    
+      <div class="section" data-cat="Running a Server">
+        <div class="sectionTitle">Running a Server</div>
+        
+          <p>📄 <a href="./docs/runserver.html">Run Your Own Server</a><br><span class="muted" style="font-size:var(--fs08)">Create a server and install the FXServer artifacts.</span></p>
+        
+          <p>📄 <a href="./docs/artifacts.html">Installing Artifacts</a><br><span class="muted" style="font-size:var(--fs08)">Download and set up the server artifacts.</span></p>
+        
+          <p>📄 <a href="./docs/resources.html">Adding Resources</a><br><span class="muted" style="font-size:var(--fs08)">Add resources to your server.</span></p>
+        
+      </div>
+    
+      <div class="section" data-cat="Scripting">
+        <div class="sectionTitle">Scripting</div>
+        
+          <p>📄 <a href="./docs/scripting.html">Scripting Basics</a><br><span class="muted" style="font-size:var(--fs08)">Write your first Lua/JS script.</span></p>
+        
+      </div>
+    
+      <div class="section" data-cat="Keymaster">
+        <div class="sectionTitle">Keymaster</div>
+        
+          <p>📄 <a href="./docs/keymaster.html">Using the Keymaster</a><br><span class="muted" style="font-size:var(--fs08)">Manage your server license keys.</span></p>
+        
+      </div>
+    
+      <div class="section" data-cat="Support">
+        <div class="sectionTitle">Support</div>
+        
+          <p>📄 <a href="./docs/faq.html">FAQ</a><br><span class="muted" style="font-size:var(--fs08)">Common questions answered.</span></p>
+        
+      </div>
+    
+  </main>
 </div>
+<script>
+function filterDocs(q){
+  q=(q||'').toLowerCase();
+  document.querySelectorAll('.docLink').forEach(a=>{
+    a.style.display = !q || a.textContent.toLowerCase().includes(q) ? '' : 'none';
+  });
+  document.querySelectorAll('.navGroup').forEach(g=>{
+    const any=[...g.querySelectorAll('.docLink')].some(a=>a.style.display!=='none');
+    g.style.display=any?'':'none';
+  });
+}
+</script>
 <footer>
   <div class="wrap">
     <div class="cols">

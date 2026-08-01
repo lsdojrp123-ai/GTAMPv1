@@ -27,11 +27,76 @@
   </div>
 </header>
 
-<div class="wrap" style="padding:44px 24px;max-width:820px">
-  <a href="../docs.html" class="muted">← All docs</a>
-  <h1 class="section-title" style="margin-top:14px">Installing Artifacts</h1>
-  <div class="card mt">Download and set up the server artifacts.</div>
+
+<div class="docs-layout">
+  <aside class="docs-nav">
+    <div class="docs-search">
+      <input type="text" id="docs-filter" placeholder="Filter documentation…" oninput="filterDocs(this.value)">
+    </div>
+    
+      <div class="navGroup">
+        <div class="navGroupTitle">Getting Started</div>
+        
+          <a class="docLink " href="../docs/getstarted.html">Getting Started</a>
+        
+          <a class="docLink " href="../docs/install.html">How to Install GTAMP</a>
+        
+      </div>
+    
+      <div class="navGroup">
+        <div class="navGroupTitle">Running a Server</div>
+        
+          <a class="docLink " href="../docs/runserver.html">Run Your Own Server</a>
+        
+          <a class="docLink active" href="../docs/artifacts.html">Installing Artifacts</a>
+        
+          <a class="docLink " href="../docs/resources.html">Adding Resources</a>
+        
+      </div>
+    
+      <div class="navGroup">
+        <div class="navGroupTitle">Scripting</div>
+        
+          <a class="docLink " href="../docs/scripting.html">Scripting Basics</a>
+        
+      </div>
+    
+      <div class="navGroup">
+        <div class="navGroupTitle">Keymaster</div>
+        
+          <a class="docLink " href="../docs/keymaster.html">Using the Keymaster</a>
+        
+      </div>
+    
+      <div class="navGroup">
+        <div class="navGroupTitle">Support</div>
+        
+          <a class="docLink " href="../docs/faq.html">FAQ</a>
+        
+      </div>
+    
+  </aside>
+  <main class="docs-content">
+    <p style="margin-bottom:12px"><a href="../docs.html" class="muted">← Documentation</a></p>
+    <h1>Installing Artifacts</h1>
+    <div class="body">
+      <p class="muted" style="margin-bottom:20px">Running a Server · GTAMP v1.6.0</p>
+      <p>Download and set up the server artifacts.</p>
+    </div>
+  </main>
 </div>
+<script>
+function filterDocs(q){
+  q=(q||'').toLowerCase();
+  document.querySelectorAll('.docLink').forEach(a=>{
+    a.style.display = !q || a.textContent.toLowerCase().includes(q) ? '' : 'none';
+  });
+  document.querySelectorAll('.navGroup').forEach(g=>{
+    const any=[...g.querySelectorAll('.docLink')].some(a=>a.style.display!=='none');
+    g.style.display=any?'':'none';
+  });
+}
+</script>
 <footer>
   <div class="wrap">
     <div class="cols">

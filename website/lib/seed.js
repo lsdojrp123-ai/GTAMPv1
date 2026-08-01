@@ -62,18 +62,49 @@ function defaultArtifacts() {
   ];
 }
 
+function defaultPosts() {
+  return [
+    { id: 1, cat: 'announcements', title: 'GTAMP v1.6.0 is live', body: 'FiveM-style launcher, remote players with nametags, F8 chat, and the new website.', uid: 1, at: Date.now() - 86400000 * 3 },
+    { id: 2, cat: 'client-support', title: 'Fixed: hook loads as v1.5.2', body: 'Reinstall the current launcher — older copies ship the old hook.', uid: 2, at: Date.now() - 86400000 * 2 },
+    { id: 3, cat: 'scripting', title: 'Your first GTAMP script', body: 'A few lines of JS or Lua is all it takes — check the docs.', uid: 3, at: Date.now() - 86400000 }
+  ];
+}
+function defaultReplies() {
+  return [
+    { id: 1, pid: 2, uid: 4, body: 'That fixed it for me, thanks!', at: Date.now() - 86400000 }
+  ];
+}
+function defaultAssets() {
+  return [
+    { id: 1, ownerId: 3, title: 'Realistic Car Pack', desc: '10 fully tuned vehicles ready for your server.', price: 12.99, cat: 'car', published: true, downloads: 340, at: Date.now() - 86400000 * 9 },
+    { id: 2, ownerId: 3, title: 'Advanced Job System', desc: 'Framework for jobs, crews, and paychecks.', price: 0, cat: 'script', published: true, downloads: 900, at: Date.now() - 86400000 * 6 },
+    { id: 3, ownerId: 1, title: 'City Hall Interior Map', desc: 'Detailed interior for roleplay servers.', price: 8.99, cat: 'map', published: true, downloads: 120, at: Date.now() - 86400000 * 4 }
+  ];
+}
+function defaultUsers() {
+  // Demo accounts so the seeded content has real authors (password: gtamp-demo)
+  const bcrypt = require('bcryptjs');
+  const hash = bcrypt.hashSync('gtamp-demo', 10);
+  return [
+    { id: 1, username: 'GTAMP_Team', email: '', password: hash, createdAt: Date.now() - 86400000 * 30 },
+    { id: 2, username: 'ServerHost', email: '', password: hash, createdAt: Date.now() - 86400000 * 20 },
+    { id: 3, username: 'Scripter', email: '', password: hash, createdAt: Date.now() - 86400000 * 15 },
+    { id: 4, username: 'Community', email: '', password: hash, createdAt: Date.now() - 86400000 * 10 }
+  ];
+}
+
 function seed() {
   store.ensure('badges', defaultBadges());
   store.ensure('forum_categories', defaultForumCategories());
   store.ensure('settings', defaultSettings());
   store.ensure('docs', defaultDocs());
   store.ensure('artifacts', defaultArtifacts());
-  store.ensure('users', []);
+  store.ensure('users', defaultUsers());
   store.ensure('servers', []);
   store.ensure('upvotes', []);
-  store.ensure('forum_posts', []);
-  store.ensure('forum_replies', []);
-  store.ensure('assets', []);
+  store.ensure('forum_posts', defaultPosts());
+  store.ensure('forum_replies', defaultReplies());
+  store.ensure('assets', defaultAssets());
   store.ensure('licenses', []);
   store.ensure('user_badges', []);
 }

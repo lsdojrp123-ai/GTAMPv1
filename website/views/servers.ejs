@@ -1,11 +1,65 @@
 <%- include('partials/head') %>
-<div class="wrap" style="padding:44px 24px">
-  <h1 class="section-title">Servers</h1>
-  <p class="section-sub">Live, synced from the GTAMP launcher. Click a server to connect.</p>
-  <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px">
-    <input type="text" id="srv-search" placeholder="Search by name, mode, or tag..." style="max-width:340px">
-    <select id="srv-tag" style="max-width:200px"><option value="">All tags</option></select>
-  </div>
-  <div id="server-list"><div class="muted">Loading servers...</div></div>
+<div class="sv-head">
+  <h1>Server <b>List</b></h1>
+  <div class="sv-stats" id="sv-stats">Loading servers…</div>
 </div>
+<div class="sv-toolbar">
+  <input type="text" id="srv-search" placeholder="Search servers by name, mode, or tag…">
+  <select id="srv-tag"><option value="">All tags</option></select>
+</div>
+<div class="sv-list" id="server-list">
+  <div class="muted" style="padding:20px 16px">Loading servers…</div>
+</div>
+<script>window.__sample = <%- JSON.stringify(typeof sampleServers !== 'undefined' ? sampleServers : []) %>;</script>
+<script>
+(function(){
+  const listEl=document.getElementById('server-list');
+  const statsEl=document.getElementById('sv-stats');
+  const search=document.getElementById('srv-search');
+  const tagSel=document.getElementById('srv-tag');
+  let all=[];
+  function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+  async function refresh(){
+    try{
+      const r=await fetch('/api/servers/live');const d=await r.json();all=d.servers||[];
+      if(!all.length){all=window.__sample||[];}
+      if(tagSel){const tags=new Set();all.forEach(s=>(s.tags||[]).forEach(t=>tags.add(t)));
+        const cur=tagSel.value;
+        tagSel.innerHTML='<option value="">All tags</option>'+[...tags].map(t=>'<option value="'+esc(t)+'">'+esc(t)+'</option>').join('');
+        tagSel.value=cur;}
+      render();
+    }catch(e){all=window.__sample||[];render();}
+  }
+  function render(){
+    const q=(search&&search.value||'').toLowerCase();
+    const t=tagSel?tagSel.value:'';
+    const rows=all.filter(s=>{
+      const hay=((s.name||'')+' '+(s.mode||'')+' '+(s.tags||[]).join(' ')).toLowerCase();
+      return (!q||hay.includes(q))&&(!t||(s.tags||[]).includes(t));
+    });
+    const tp=all.reduce((a,s)=>a+(s.players||0),0);
+    statsEl.innerHTML='<b>'+all.length+'</b> servers · <b>'+tp+'</b> players online right now';
+    if(!rows.length){listEl.innerHTML='<div class="muted" style="padding:20px 16px">No servers match your search.</div>';return;}
+    listEl.innerHTML=rows.map(s=>{
+      const pct=Math.min(100,Math.round(((s.players||0)/(s.maxPlayers||64))*100));
+      return '<div class="sv-row" onclick="location.href=\'/servers/'+s.id+'\'">'+
+        '<div class="sv-icon">'+esc((s.name||'S')[0])+'</div>'+
+        '<div class="sv-main">'+
+          '<div class="sv-name"><span class="live-dot"></span>'+esc(s.name)+'</div>'+
+          '<div class="sv-desc">'+esc(s.desc||s.mode||'')+'</div>'+
+          '<div class="sv-tags">'+(s.tags||[]).map(x=>'<span class="tag">'+esc(x)+'</span>').join('')+'</div>'+
+        '</div>'+
+        '<div class="sv-right">'+
+          '<div class="sv-players">'+s.players+'<span>/'+(s.maxPlayers||64)+' players</span></div>'+
+          '<div class="sv-bar"><i style="width:'+pct+'%"></i></div>'+
+          '<div class="sv-up">▲ <b>'+(s.upvotes||0)+'</b> · '+esc(s.mode||'Freeroam')+'</div>'+
+        '</div>'+
+      '</div>';
+    }).join('');
+  }
+  if(search)search.addEventListener('input',render);
+  if(tagSel)tagSel.addEventListener('change',render);
+  refresh();setInterval(refresh,8000);
+})();
+</script>
 <%- include('partials/foot') %>

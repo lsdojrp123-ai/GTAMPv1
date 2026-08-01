@@ -189,24 +189,31 @@ app.post('/login', (req, res) => {
 app.get('/logout', (req, res) => { req.session.destroy(() => res.redirect('/')); });
 
 // ---------- Forum ----------
+function usersMap() {
+  const m = {};
+  store.load('users', []).forEach(u => { m[u.id] = u; });
+  return m;
+}
 app.get('/forum', (req, res) => {
   const cats = store.load('forum_categories', []);
   const posts = store.load('forum_posts', []);
-  res.render('forum', { user: publicUser(userById(req.session.uid)), settings: settings(), cats, posts });
+  res.render('forum', { user: publicUser(userById(req.session.uid)), settings: settings(), cats, posts, usersMap: usersMap() });
 });
 app.get('/forum/:cat', (req, res) => {
   const cats = store.load('forum_categories', []);
   const cat = cats.find(c => c.id === req.params.cat);
   if (!cat) return res.status(404).send('Category not found');
   const posts = store.load('forum_posts', []).filter(p => p.cat === cat.id);
-  res.render('forum_cat', { user: publicUser(userById(req.session.uid)), settings: settings(), cat, posts });
+  res.render('forum_cat', { user: publicUser(userById(req.session.uid)), settings: settings(), cat, posts, usersMap: usersMap() });
 });
 app.get('/forum/thread/:id', (req, res) => {
   const posts = store.load('forum_posts', []);
   const post = posts.find(p => Number(p.id) === Number(req.params.id));
   if (!post) return res.status(404).send('Thread not found');
   const replies = store.load('forum_replies', []).filter(r => Number(r.pid) === post.id);
-  res.render('thread', { user: publicUser(userById(req.session.uid)), settings: settings(), post, replies });
+  const cats = store.load('forum_categories', []);
+  const cat = cats.find(c => c.id === post.cat) || null;
+  res.render('thread', { user: publicUser(userById(req.session.uid)), settings: settings(), post, replies, cat, usersMap: usersMap() });
 });
 app.post('/forum/:cat/new', requireAuth, (req, res) => {
   const { title, body } = req.body;
@@ -230,7 +237,7 @@ app.get('/support', (req, res) => {
 // ---------- Marketplace ----------
 app.get('/marketplace', (req, res) => {
   const assets = store.load('assets', []).filter(a => a.published);
-  res.render('marketplace', { user: publicUser(userById(req.session.uid)), settings: settings(), assets });
+  res.render('marketplace', { user: publicUser(userById(req.session.uid)), settings: settings(), assets, usersMap: usersMap() });
 });
 app.get('/marketplace/:id', (req, res) => {
   const assets = store.load('assets', []);
@@ -262,9 +269,10 @@ app.get('/docs', (req, res) => {
   res.render('docs', { user: publicUser(userById(req.session.uid)), settings: settings(), docs: store.load('docs', []) });
 });
 app.get('/docs/:id', (req, res) => {
-  const doc = store.load('docs', []).find(d => d.id === req.params.id);
+  const all = store.load('docs', []);
+  const doc = all.find(d => d.id === req.params.id);
   if (!doc) return res.status(404).send('Doc not found');
-  res.render('doc', { user: publicUser(userById(req.session.uid)), settings: settings(), doc });
+  res.render('doc', { user: publicUser(userById(req.session.uid)), settings: settings(), doc, docs: all });
 });
 
 // ---------- Run your own server ----------
