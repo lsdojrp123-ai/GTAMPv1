@@ -189,9 +189,25 @@ class FXServer {
         this.events.emit('net:' + pkt.t, this._findPlayerByEndpoint(rinfo), pkt);
         break;
       case 'damage': {
+        // self-report (legacy): keep own state in sync
         const player = this._findPlayerByEndpoint(rinfo);
         if (player && player.ped) {
           player.ped.state.set('health', Math.max(0, pkt.health ?? player.ped.state.get('health')));
+        }
+        break;
+      }
+      case 'hit': {
+        // v1.9.0 — damage routing: shooter hit victim (target netId). Forward to the victim.
+        const shooter = this._findPlayerByEndpoint(rinfo);
+        if (!shooter) break;
+        const target = Number(pkt.target || 0);
+        const d = Math.max(0, Math.min(300, Number(pkt.d) || 0));
+        if (!d) break;
+        const all = this.pm && this.pm.getAll ? this.pm.getAll() : [];
+        const victim = all.find(p => Number(p.netId) === target);
+        if (victim && victim.endpoint && victim !== shooter) {
+          this._send({ t: 'damage', d, from: shooter.netId, fromName: shooter.name }, victim.endpoint, false);
+          if (this.debug) console.log(`[fxserver] hit ${shooter.name} -> ${victim.name} d=${d}`);
         }
         break;
       }

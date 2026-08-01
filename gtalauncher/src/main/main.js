@@ -251,6 +251,11 @@ function handleServerPacket(pkt) {
       hookBroadcast({ t: 'chat', name: 'SERVER', msg: 'Kicked: ' + (pkt.reason || '') });
       break;
     }
+    case 'damage': {
+      // v1.9.0 — a remote player hit US: forward into the game fiber (health/armour apply)
+      hookBroadcast({ t: 'dmg', d: pkt.d || 0, from: pkt.fromName || ('Player #' + (pkt.from || pkt.netId || '?')) });
+      break;
+    }
     default:
       break;
   }
@@ -397,11 +402,20 @@ function ensureHookTcpServer() {
                 t: 'pos',
                 x: m.x, y: m.y, z: m.z, h: m.h || 0,
                 vx: 0, vy: 0, vz: 0,
-                health: 200,
+                health: typeof m.health === 'number' ? m.health : 200,
+                armour: typeof m.armour === 'number' ? m.armour : 0,
                 model: 'mp_m_freemode_01'
               });
             }
             if (!mpGotOtherPlayer) startSoloBot();
+          } else if (m.t === 'hit') {
+            // v1.9.0 — local player damaged a remote clone: report to server (damage routing)
+            const target = parseInt(String(m.id || '').replace(/^p/, ''), 10);
+            const d = Math.max(0, Math.min(300, parseInt(m.d, 10) || 0));
+            if (mpSpawned && target > 0 && d > 0) {
+              mpSend({ t: 'hit', target, d });
+              writeLaunchDiag(['hit -> server: target=' + target + ' d=' + d]);
+            }
           } else if (m.t === 'consoleCmd') {
             // v1.8.0 — commands typed into the in-game F8 console
             if (m.cmd === 'connect' && m.arg) {
@@ -805,7 +819,7 @@ function verifyGtaOwnership(dir) {
 }
 
 // ---------- Loading window: startup splash + server connect (v1.7.0) ----------
-const LAUNCHER_VER = '1.8.0';
+const LAUNCHER_VER = '1.9.0';
 function openLoading(mode, opts = {}) {
   closeLoading();
   loadingWin = new BrowserWindow({
@@ -1035,6 +1049,133 @@ ipcMain.on('loading:action', (_e, act) => {
 });
 
 // ---------- Connect flow: join server with FiveM-style loading (v1.7.0) ----------
+// ---------- v1.9.0: FiveM-parity pre-launch environment ----------
+// Modeled on citizenfx/fivem code/client/launcher (Main.cpp DoPreLaunchTasks,
+// DisableNVSP.cpp, ExecutablePreload.cpp) — mirrored with our own code.
+function fixGtaSettings(gtaDir) {
+  // Rockstar support's #1 fix for ERR_GFX_D3D_INIT: bad DX level / corrupt settings.xml.
+  // Force DirectX 11 (value 2). Never delete the file silently — patch in place.
+  const out = { touched: false, detail: 'settings.xml not found' };
+  try {
+    const docs = path.join(process.env.USERPROFILE || require('os').homedir(), 'Documents');
+    const cands = [
+      path.join(docs, 'Rockstar Games', 'GTA V', 'settings.xml'),
+      path.join(docs, 'Rockstar Games', 'Social Club', 'settings.xml')
+    ];
+    for (const f of cands) {
+      try {
+        if (!fs.existsSync(f)) continue;
+        let x = fs.readFileSync(f, 'utf8');
+        let changed = false;
+        const m = x.match(/<DX_Version\s+value="(\d+)"\s*\/>/);
+        if (m && m[1] !== '2') { x = x.replace(/<DX_Version\s+value="\d+"\s*\/>/, '<DX_Version value="2" />'); changed = true; }
+        const h = x.match(/<HDR\s+value="true"\s*\/>/);
+        if (h) { x = x.replace(/<HDR\s+value="true"\s*\/>/, '<HDR value="false" />'); changed = true; } // HDR mismatch also triggers D3D init fail on some systems
+        if (changed) {
+          try { fs.copyFileSync(f, f + '.gtamp.bak'); } catch {}
+          fs.writeFileSync(f, x);
+        }
+        out.touched = true;
+        out.detail = changed ? 'settings patched → DirectX 11' : 'settings OK (DX11)';
+        return out;
+      } catch (e) { out.detail = 'settings patch error: ' + e.message; }
+    }
+  } catch (e) { out.detail = 'settings check error: ' + e.message; }
+  return out;
+}
+
+function killGameProcesses() {
+  // Same idea as FiveM's "switchcl" flow: exactly ONE game instance may exist when we connect.
+  const names = ['GTA5.exe', 'GTA5_Enhanced.exe', 'PlayGTAV.exe', 'GTAVLauncher.exe', 'Launcher.exe', 'LauncherPatcher.exe', 'subprocess.exe'];
+  for (const n of names) {
+    try { require('child_process').execSync('taskkill /F /IM "' + n + '" /T', { windowsHide: true, stdio: 'ignore' }); } catch {}
+  }
+}
+
+function queryNvNode() {
+  // citizenfx/fivem DisableNVSP.cpp verbatim flow: NvNode state → port+secret → local HTTP API.
+  return new Promise((resolve) => {
+    try {
+      const f = path.join(process.env.LOCALAPPDATA || '', 'NVIDIA Corporation', 'NvNode', 'nodejs.json');
+      if (!fs.existsSync(f)) return resolve(null);
+      const st = JSON.parse(fs.readFileSync(f, 'utf8'));
+      if (!st || typeof st.port !== 'number' || !st.secret) return resolve(null);
+      const http = require('http');
+      const req = http.request({
+        host: '127.0.0.1', port: st.port, path: '/ShadowPlay/v.1.0/Launch', method: 'GET',
+        headers: { 'X_LOCAL_SECURITY_COOKIE': st.secret }, timeout: 2000
+      }, (res) => {
+        let b = ''; res.on('data', c => b += c);
+        res.on('end', () => {
+          try { const j = JSON.parse(b); resolve({ port: st.port, secret: st.secret, enabled: !!j.launch }); }
+          catch { resolve(null); }
+        });
+      });
+      req.on('error', () => resolve(null));
+      req.on('timeout', () => { req.destroy(); resolve(null); });
+      req.end();
+    } catch { resolve(null); }
+  });
+}
+
+function nvspSet(conn, enabled) {
+  return new Promise((resolve) => {
+    try {
+      const http = require('http');
+      const req = http.request({
+        host: '127.0.0.1', port: conn.port, path: '/ShadowPlay/v.1.0/Launch', method: 'POST',
+        headers: { 'X_LOCAL_SECURITY_COOKIE': conn.secret, 'Content-Type': 'application/json' }, timeout: 2000
+      }, (res) => { res.resume(); resolve(res.statusCode <= 399); });
+      req.on('error', () => resolve(false));
+      req.on('timeout', () => { req.destroy(); resolve(false); });
+      req.end(JSON.stringify({ launch: enabled }));
+    } catch { resolve(false); }
+  });
+}
+let nvspDisabledByUs = null; // remembered cookie so we restore on quit (like FiveM's enable_nvsp cookie)
+
+function checkComponentUpdates() {
+  // FiveM's "Updating components" stage — pull the published launcher version from our website.
+  return new Promise((resolve) => {
+    try {
+      const site = String(config.websiteUrl || defaultConfig.websiteUrl || '').replace(/\/+$/, '');
+      if (!site || !/^https?:/.test(site)) return resolve(null);
+      const u = new URL(site + '/api/launcher/version');
+      const lib = u.protocol === 'https:' ? require('https') : require('http');
+      const req = lib.get({ hostname: u.hostname, port: u.port || (u.protocol === 'https:' ? 443 : 80), path: u.pathname, timeout: 3500 }, (res) => {
+        let b = ''; res.on('data', c => b += c);
+        res.on('end', () => {
+          try { const j = JSON.parse(b); resolve(j && j.version ? j : null); } catch { resolve(null); }
+        });
+      });
+      req.on('error', () => resolve(null));
+      req.on('timeout', () => { req.destroy(); resolve(null); });
+    } catch { resolve(null); }
+  });
+}
+
+async function waitForGtaWindow(maxMs, ctl, statusFn) {
+  // The ERR_GFX_D3D_INIT fix hinges on this: FiveM loads the game inside its own process and only
+  // surfaces once D3D is fully initialised. We mirror that contract: NO injection until GTA has
+  // created its real window (== device created & past gfx init), then a settle grace.
+  const t0 = Date.now();
+  while (Date.now() - t0 < maxMs) {
+    if (ctl && ctl.cancelled) return false;
+    try {
+      const ps = '(Get-Process -Name GTA5,GTA5_Enhanced -ErrorAction SilentlyContinue | Where-Object {$_.MainWindowHandle -ne 0}).Id -join ","';
+      const out = require('child_process').execSync('powershell -NoProfile -Command "' + ps + '"', { windowsHide: true, timeout: 8000 }).toString().trim();
+      const pid = parseInt(out.split(',')[0], 10);
+      if (pid > 0) return pid;
+    } catch {}
+    if (statusFn) {
+      const left = Math.ceil((maxMs - (Date.now() - t0)) / 1000);
+      statusFn('Waiting for the game window… up to ' + left + 's (compiling shaders / loading story world)');
+    }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  return 0;
+}
+
 async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
   const serverName = serverAddr || 'GTAMP Official #1';
   if (connectCtl) { const old = connectCtl; connectCtl = null; try { await old.cancel(true); } catch {} }
@@ -1075,14 +1216,19 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
   connectCtl = ctl;
   const sleep = (ms) => new Promise(r => { const t = setTimeout(r, ms); });
   const stepDefs = [
+    ['Initializing GTAMP runtime', 'INITIALIZING GTAMP RUNTIME'],
     ['Verifying GTA V ownership', 'VERIFYING GAME OWNERSHIP'],
-    ['Starting ' + (launch.ensurePlatform === 'steam' ? 'Steam' : launch.ensurePlatform === 'epic' ? 'Epic' : 'Rockstar') + ' platform', 'STARTING GAME PLATFORM'],
-    ['Launching Grand Theft Auto V', 'STARTING GTA V'],
-    ['Waiting for GTA5.exe', 'WAITING FOR GTA5.EXE'],
+    ['Checking game files', 'CHECKING GAME FILES'],
+    ['Preparing game environment', 'PREPARING GAME ENVIRONMENT'],
+    ['Updating components', 'UPDATING COMPONENTS'],
+    ['Connecting to Rockstar Games services', 'CONNECTING TO ROCKSTAR GAMES SERVICES'],
+    ['Launching Grand Theft Auto V', 'STARTING GRAND THEFT AUTO V'],
+    ['Waiting for game window', 'WAITING FOR GAME WINDOW'],
+    ['Preparing injection', 'PREPARING INJECTION'],
     ['Injecting GTAMP hook', 'INJECTING GTAMP HOOK'],
     ['Linking multiplayer hook', 'LINKING MULTIPLAYER HOOK'],
     ['Connecting to server', 'CONNECTING TO ' + serverName.toUpperCase()],
-    ['Spawning into session', 'LOADING INTO SESSION']
+    ['Loading into session', 'LOADING INTO SESSION']
   ];
   const steps = stepDefs.map(d => ({ label: d[0], state: 'pending' }));
   const setStep = (i, state, sub) => {
@@ -1095,7 +1241,8 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
     try { hookBroadcast({ t: 'joinFail', msg: title }); } catch {}
   };
 
-  // Net endpoints first, so the hook has somewhere to land
+  // STEP 0 — runtime: hook TCP server + MP UDP endpoint first, so the hook has somewhere to land
+  setStep(0, 'active', 'Binding local bridges…');
   try { ensureHookTcpServer(); } catch (e) { writeLaunchDiag(['ensureHookTcpServer: ' + e.message]); }
   try {
     ensureMpUdp(effectiveAddr);
@@ -1107,23 +1254,57 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
   if (mainWindow) mainWindow.hide();
   ensureTray();
   loadingSteps(steps);
-  loadingStatus('CONNECTING TO ' + serverName.toUpperCase(), '');
+  loadingStatus('INITIALIZING GTAMP RUNTIME', '');
+  await sleep(300);
+  setStep(0, 'done', 'local bridges up');
 
-  // STEP 0 — ownership
-  setStep(0, 'active', 'Checking your game files…');
+  // STEP 1 — ownership
+  setStep(1, 'active', 'Checking your game files…');
   const v = verifyGtaOwnership(config.gtaPath);
   await sleep(250);
   if (ctl.cancelled) return;
   if (!v.ok) {
-    fail(0, 'Could not verify GTA V',
+    fail(1, 'Could not verify GTA V',
       'GTAMP needs a genuine, fully installed copy.\n\n' + v.checks.map(c => (c.ok ? '✓ ' : '✗ ') + c.label).join('\n'),
       [{ id: 'pickFolder', label: 'Choose folder…' }, { id: 'cancel', label: 'Cancel' }]);
     return;
   }
-  setStep(0, 'done', (v.edition === 'enhanced' ? 'GTAV Enhanced' : 'GTAV Legacy') + ' · ' + (v.platform || 'PC'));
+  setStep(1, 'done', (v.edition === 'enhanced' ? 'GTAV Enhanced' : 'GTAV Legacy') + ' · ' + (v.platform || 'PC'));
 
-  // STEP 1 — platform
-  setStep(1, 'active', launch.note || '…');
+  // STEP 2 — game file integrity summary
+  setStep(2, 'active', 'Validating game installation…');
+  await sleep(320);
+  setStep(2, 'done', (v.checks || []).filter(c => c.ok).length + ' checks passed');
+
+  // STEP 3 — game environment (FiveM DoPreLaunchTasks parity)
+  setStep(3, 'active', 'Forcing DirectX 11 + clearing stale game processes…');
+  const fxSet = fixGtaSettings(config.gtaPath);
+  writeLaunchDiag(['prep: ' + (fxSet.detail || '')]);
+  try { killGameProcesses(); } catch {}
+  let nv = null;
+  try { nv = await queryNvNode(); } catch {}
+  if (nv && nv.enabled) {
+    setStep(3, 'active', 'NVIDIA ShadowPlay is ON — pausing it for this session (known GTA V graphics-init conflict, per FiveM launcher)');
+    const okOff = await nvspSet(nv, false);
+    if (okOff) { nvspDisabledByUs = nv; writeLaunchDiag(['prep: ShadowPlay disabled for this session (restored on quit)']); }
+  }
+  await sleep(150);
+  if (ctl.cancelled) return;
+  setStep(3, 'done', (fxSet.detail || 'environment ready') + (nvspDisabledByUs ? ' · ShadowPlay paused' : ''));
+
+  // STEP 4 — components (update check against our website)
+  setStep(4, 'active', 'Checking for GTAMP updates…');
+  const upd = await checkComponentUpdates();
+  if (ctl.cancelled) return;
+  if (upd && upd.version && upd.version !== LAUNCHER_VER) {
+    setStep(4, 'done', 'update available: v' + upd.version + ' — you are on v' + LAUNCHER_VER);
+    writeLaunchDiag(['components: update available v' + upd.version]);
+  } else {
+    setStep(4, 'done', 'v' + LAUNCHER_VER + ' up to date');
+  }
+
+  // STEP 5 — Rockstar Games services (platform must be up BEFORE the game, Rockstar entitlement flow)
+  setStep(5, 'active', launch.note || '…');
   try {
     if (launch.ensurePlatform) {
       ensurePlatformRunning(launch.ensurePlatform);
@@ -1131,10 +1312,10 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
     }
   } catch {}
   if (ctl.cancelled) return;
-  setStep(1, 'done');
+  setStep(5, 'done');
 
-  // STEP 2 — launch GTA
-  setStep(2, 'active', launch.note || '');
+  // STEP 6 — launch GTA
+  setStep(6, 'active', launch.note || '');
   try {
     const useShell = !!launch.shell || launch.kind === 'steam-url' || launch.kind === 'epic';
     writeLaunchDiag(['launching kind=' + launch.kind, 'exe=' + launch.exe, 'args=' + JSON.stringify(launch.args || []), launch.note || '']);
@@ -1145,15 +1326,15 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
     gameProc.unref();
     gameProc.on('error', e => writeLaunchDiag(['game launch error: ' + e.message]));
   } catch (e) {
-    fail(2, 'Could not start GTA V', e.message);
+    fail(6, 'Could not start GTA V', e.message);
     return;
   }
   await sleep(1200);
   if (ctl.cancelled) return;
-  setStep(2, 'done');
+  setStep(6, 'done');
 
-  // STEP 3 — wait for GTA5.exe
-  setStep(3, 'active', 'The game can take a minute to appear…');
+  // STEP 7 — wait for the game process, THEN a real window (= D3D init succeeded)
+  setStep(7, 'active', 'The game can take a minute to appear…');
   const waitMs = (launch.injectWaitMs || 90000) + 60000;
   const t0 = Date.now();
   let found = false;
@@ -1162,56 +1343,79 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
     found = gtaRunning();
     if (found) break;
     const left = Math.ceil((waitMs - (Date.now() - t0)) / 1000);
-    loadingStatus('WAITING FOR GTA5.EXE', 'This can take a minute — up to ' + left + 's remaining');
+    loadingStatus('WAITING FOR GAME WINDOW', 'Game process — up to ' + left + 's remaining');
     await sleep(2000);
   }
   if (ctl.cancelled) return;
   if (!found) {
-    fail(3, 'GTA5.exe never appeared',
+    fail(7, 'GTA5.exe never appeared',
       'The game did not start. Retry, or start GTA V yourself and press Retry Inject.',
       [{ id: 'retryInject', label: 'Retry Inject' }, { id: 'cancel', label: 'Cancel' }]);
     return;
   }
-  setStep(3, 'done', 'GTA5.exe found');
+  setStep(7, 'active', 'Process found — waiting for the game window (graphics init)…');
+  const wPid = await waitForGtaWindow(240000, ctl, (s) => loadingStatus('WAITING FOR GAME WINDOW', s));
+  if (ctl.cancelled) return;
+  if (!wPid) {
+    fail(7, 'Game window never appeared',
+      'GTA V started but never finished graphics init (e.g. ERR_GFX_D3D_INIT).\n\nGTAMP already forced DirectX 11 in settings.xml and paused ShadowPlay for this session. Still failing usually means: outdated GPU drivers (run the DirectX installer in your GTA folder), or an overlay conflict — close GeForce ShadowPlay / Discord overlay / MSI Afterburner + RivaTuner, reboot once, then Retry.',
+      [{ id: 'retry', label: 'Retry' }, { id: 'cancel', label: 'Cancel' }]);
+    return;
+  }
+  setStep(7, 'done', 'game window up (D3D ready)');
 
-  // STEP 4 — inject
-  setStep(4, 'active', 'gtamp_hook.dll → GTA5.exe');
-  writeLaunchDiag(['GTA5.exe detected — injecting GTAMP hook']);
+  // STEP 8 — settle grace before touching the process (FiveM surfaces only after D3D is fully up)
+  setStep(8, 'active', 'Letting the game render its first frames…');
+  {
+    const settleMs = Math.max(1000, parseInt(process.env.GTAMP_SETTLE_MS || '6000', 10) || 6000);
+    const st0 = Date.now();
+    while (Date.now() - st0 < settleMs) {
+      if (ctl.cancelled) return;
+      const left = Math.ceil((settleMs - (Date.now() - st0)) / 1000);
+      loadingStatus('PREPARING INJECTION', 'Injecting in ' + left + 's — the game is rendering normally');
+      await sleep(500);
+    }
+  }
+  setStep(8, 'done');
+
+  // STEP 9 — inject
+  setStep(9, 'active', 'gtamp_hook.dll → GTA5.exe');
+  writeLaunchDiag(['game window confirmed — injecting GTAMP hook']);
   const injRes = runInjector();
   await sleep(1200);
   if (ctl.cancelled) return;
-  if (!injRes.ok) { fail(4, 'Injection failed', injRes.error || 'unknown'); return; }
-  setStep(4, 'done');
+  if (!injRes.ok) { fail(9, 'Injection failed', injRes.error || 'unknown'); return; }
+  setStep(9, 'done');
   // From here the game itself shows GTAMP's FiveM-style in-game connect panel
   try { hookBroadcast({ t: 'joinBegin', server: serverName }); } catch {}
 
-  // STEP 5 — hook link
-  setStep(5, 'active', 'Waiting for the hook to report in…');
+  // STEP 10 — hook link
+  setStep(10, 'active', 'Waiting for the hook to report in…');
   try { hookConnect(); } catch (e) {}
   const helloOk = await ctl.waitFor('hookHello', 90000);
   if (ctl.cancelled) return;
   if (!helloOk) {
-    fail(5, 'Hook did not come online',
+    fail(10, 'Hook did not come online',
       'The DLL was injected but never connected back. Antivirus may be blocking it — or try Retry Inject.',
       [{ id: 'retryInject', label: 'Retry Inject' }, { id: 'cancel', label: 'Cancel' }]);
     return;
   }
-  setStep(5, 'done', 'hook online · F8 console + T chat active');
+  setStep(10, 'done', 'hook online · F8 console + T chat active');
   startGtaExitWatch();
 
-  // STEP 6 — server handshake
-  setStep(6, 'active', 'Handshaking with ' + effectiveAddr + '…');
+  // STEP 11 — server handshake
+  setStep(11, 'active', 'Handshaking with ' + effectiveAddr + '…');
   try { hookBroadcast({ t: 'joinStage', stage: 'Handshaking with server' }); } catch {}
   const welcomeOk = await ctl.waitFor('welcome', 15000);
   if (ctl.cancelled) return;
-  setStep(6, 'done', welcomeOk ? 'connected' : 'server unreachable — continuing offline');
+  setStep(11, 'done', welcomeOk ? 'connected' : 'server unreachable — continuing offline');
 
-  // STEP 7 — spawn
-  setStep(7, 'active', 'Streaming world state…');
+  // STEP 12 — spawn
+  setStep(12, 'active', 'Streaming world state…');
   try { hookBroadcast({ t: 'joinStage', stage: 'Loading session — streaming world' }); } catch {}
   await ctl.waitFor('spawn', 15000);
   if (ctl.cancelled) return;
-  setStep(7, 'done');
+  setStep(12, 'done');
 
   loadingStatus('IN SESSION — HAVE FUN!', 'GTAMP keeps running in the background', 1);
   try { hookBroadcast({ t: 'joinEnd', ok: 1 }); } catch {}
@@ -1260,7 +1464,14 @@ app.on('window-all-closed', () => {
   if (!startupDone) return; // transient window swap in progress — do nothing
   if (BrowserWindow.getAllWindows().length === 0) { cleanup(); if (process.platform!=='darwin') app.quit(); }
 });
-app.on('before-quit', cleanup);
+app.on('before-quit', () => {
+  cleanup();
+  // v1.9.0 — restore NVIDIA ShadowPlay if we paused it (FiveM restores via its enable_nvsp cookie)
+  if (nvspDisabledByUs) {
+    const conn = nvspDisabledByUs;
+    nvspSet(conn, true).then(ok => writeLaunchDiag(['ShadowPlay restored: ' + ok]));
+  }
+});
 Menu.setApplicationMenu(null);
 
 function cleanup() {

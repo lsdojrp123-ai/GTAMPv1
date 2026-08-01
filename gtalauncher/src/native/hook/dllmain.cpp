@@ -17,7 +17,7 @@
 #pragma comment(lib,"version.lib")
 #pragma comment(lib,"winmm.lib")
 
-#define HOOK_VER "1.8.0"
+#define HOOK_VER "1.9.0"
 #define OVERLAY_KEY RGB(255,0,255)
 #define OV_CLASS "GTAMP_OV160"
 static volatile bool g_running=true;
@@ -31,6 +31,9 @@ static char g_ver[64]={0};
 static bool g_joinActive=false, g_joinFailed=false;
 static char g_joinServer[64]={0};
 static char g_joinStage[96]={0};
+// v1.9.0: incoming damage queue (net thread -> game fiber)
+static int g_pendingDmg=0;
+static char g_pendingDmgFrom[32]={0};
 static DWORD g_joinT0=0;
 static bool g_consoleOpen=false;
 static char g_conInput[192]={0};
@@ -69,6 +72,7 @@ struct NetPed{
     float drawH;          // interpolated heading
     float vx,vy,vz;
     int health, armour;
+    int appliedHp;        // v1.9.0: last health value WE set (damage delta baseline)
     DWORD lastUpdate;
     int wantRespawn;      // model change: del entity but keep slot
     int spawnQueued;     // NQ_SPAWN already in flight
@@ -140,7 +144,21 @@ static void runConsoleCommand(const char* raw){
     for(int k=0; arg[k]; k++){ if(arg[k]=='\"'||arg[k]=='\\'||arg[k]=='{'||arg[k]=='}') arg[k]=' '; }
     { char echo[240]; snprintf(echo,sizeof(echo),"> %s", raw); pushConLine(echo,150,150,155); }
     if(!_stricmp(cmd,"help")){
-        pushConLine("commands: help · clear · connect <ip:port> · disconnect · version · credit", 200,220,255);
+        pushConLine("commands: help · clear · connect <ip:port> · disconnect · quit · status · players · version · credit", 200,220,255);
+    } else if(!_stricmp(cmd,"status")){
+        int n=0; EnterCriticalSection(&g_npCs); for(int i=0;i<NET_PED_MAX;i++) if(g_netPeds[i].used) n++; LeaveCriticalSection(&g_npCs);
+        char s[200]; snprintf(s,sizeof(s),"v%s · server: %s · %d remote player(s) · F8 console v%s",
+            HOOK_VER, g_joinServer[0]?g_joinServer:"(not connected)", n, g_ver[0]?g_ver:"?");
+        pushConLine(s,140,220,180);
+    } else if(!_stricmp(cmd,"players")){
+        EnterCriticalSection(&g_npCs);
+        int n=0;
+        for(int i=0;i<NET_PED_MAX;i++){ NetPed*np=&g_netPeds[i]; if(!np->used) continue; n++;
+            char pl[120]; snprintf(pl,sizeof(pl),"[%d] %s — hp %d ar %d", np->serverId, np->name[0]?np->name:np->id, np->health, np->armour);
+            pushConLine(pl,220,220,220);
+        }
+        LeaveCriticalSection(&g_npCs);
+        if(!n) pushConLine("(no remote players in session)", 180,180,180);
     } else if(!_stricmp(cmd,"clear")){
         EnterCriticalSection(&g_conCs); g_conLogN=0; LeaveCriticalSection(&g_conCs);
     } else if(!_stricmp(cmd,"quit")){
@@ -467,6 +485,47 @@ static void processNetPeds(DWORD now){
         Invoker(H_SET_HEADING).argi(np->ped).argf(np->drawH).retv();
         (void)H_SET_COORDS_NO_OFFSET;
         (void)H_IS_ENTITY_VISIBLE;
+        // ---- v1.9.0: health/armour sync + basic damage (FiveM-style, owner-authoritative) ----
+        {
+            const uint64_t H_GET_HEALTH  = 0xEEF059A8E6C27644ULL; // GET_ENTITY_HEALTH
+            const uint64_t H_SET_HEALTH  = 0x6B76DC1F3AE6E6A8ULL; // SET_ENTITY_HEALTH
+            const uint64_t H_DAMAGED_BY  = 0xC86D67D52A707CF8ULL; // HAS_ENTITY_BEEN_DAMAGED_BY_ENTITY
+            const uint64_t H_GET_ARMOUR  = 0x9483AF821605B1D8ULL; // GET_PED_ARMOUR
+            const uint64_t H_SET_ARMOUR  = 0xCEBA04A519F17003ULL; // SET_PED_ARMOUR
+            const uint64_t H_IS_DEAD     = 0x3317DEDB88C95038ULL; // IS_PED_DEAD_OR_DYING
+            int curHp = Invoker(H_GET_HEALTH).argi(np->ped).reti();
+            int isDead = Invoker(H_IS_DEAD).argi(np->ped).argb(true).reti();
+            int wantHp = np->health > 0 ? np->health : 200;
+            // 1) local player damaging this remote clone -> report delta to the clone's owner
+            if(!isDead && g_localPed){
+                int dmgByMe = Invoker(H_DAMAGED_BY).argi(np->ped).argi(g_localPed).argb(true).reti();
+                if(dmgByMe){
+                    int base = np->appliedHp > 0 ? np->appliedHp : wantHp;
+                    int delta = base - curHp;
+                    if(delta > 0 && delta < 500){
+                        sendJson("{\"t\":\"hit\",\"id\":\"%s\",\"d\":%d}", np->id, delta);
+                        char hl[128]; snprintf(hl,sizeof(hl),"You hit %s (-%d)", np->name[0]?np->name:np->id, delta);
+                        pushChatLine(hl,255,200,140);
+                        logf("dmg: local hit %s -%d (%d->%d)", np->id, delta, base, curHp);
+                    }
+                }
+            }
+            // 2) mirror the owner's authoritative health/armour onto the clone
+            if(wantHp < 100){
+                // owner died -> kill the clone (death sync)
+                if(!isDead){ Invoker(H_SET_HEALTH).argi(np->ped).argi(0).argi(0).argi(0).retv(); np->appliedHp = 0; }
+            } else {
+                if(!isDead && curHp != wantHp){ Invoker(H_SET_HEALTH).argi(np->ped).argi(wantHp).argi(0).argi(0).retv(); }
+                np->appliedHp = wantHp;
+            }
+            int curAr = Invoker(H_GET_ARMOUR).argi(np->ped).reti();
+            if(np->armour >= 0 && curAr != np->armour){ Invoker(H_SET_ARMOUR).argi(np->ped).argi(np->armour).retv(); }
+            // 3) clone ended up dead but its owner is alive -> fresh clone at the target pos
+            if(isDead && wantHp >= 100){
+                logf("net: clone died but owner alive id=%s -> respawn clone", np->id);
+                np->ped = 0; np->blip = 0; np->wantRespawn = 1; np->spawnQueued = 0; np->appliedHp = 0;
+            }
+        }
     }
 }
 // GET_SCREEN_COORD_FROM_WORLD_COORD — push two float* outs via Invoker::argp
@@ -534,7 +593,8 @@ static void drawNametags(){
         // Talking / health under-bar approximation: thin second line with HP%
         if(dist < 25.f){
             char sub[32];
-            int pct = hp > 200 ? 100 : (hp * 100) / 200;
+            // GTA alive range is 100..200 — map onto 0..100% (v1.9.0 fix)
+            int pct = hp <= 100 ? 0 : (hp >= 200 ? 100 : (((hp - 100) * 100) / 100));
             snprintf(sub, sizeof(sub), "HP %d%%", pct);
             drawText2d(sub, sx, sy + 0.018f, scale * 0.75f, 180, 220, 180, a - 40, true);
         }
@@ -637,10 +697,42 @@ static void __cdecl shvScriptMain(){
         if(!g_localPed){static DWORD lt=0;if(now-lt>500){lt=now;pidx=Invoker(H_PLAYER_ID).reti();int p=Invoker(H_PPID).reti();if(p&&timeGetTime()-t0>8000){g_localPed=p;g_shvReady=true;logf("SHV READY: playerIdx=%d ped=0x%X (uptime=%ums) netPeds=%d",pidx,p,(unsigned)(timeGetTime()-t0),g_netPedCount);strcpy_s(g_f.err,"Scanning mem for ped...");sendJson("{\"t\":\"ready\",\"ped\":%d,\"uptime\":%lu}",p,(unsigned long)(timeGetTime()-t0));if(g_gta&&IsWindow(g_gta)){SetForegroundWindow(g_gta);logf("brought GTA window to front");}}else{static DWORD ll=0;if(now-ll>3000){ll=now;logf("SHV: waiting for ped... t=%ums p=%d",(unsigned)(timeGetTime()-t0),p);}}}continue;}
         // Apply remote-ped movement every tick (smooth)
         if(now-lastNetTick>16){lastNetTick=now;processNetPeds(now);tickLocalTestBot_SHV(now);}
+        // v1.9.0: incoming damage from remote players (armour soaks first, GTA semantics)
+        {
+            int d=0; char from[32]={0};
+            EnterCriticalSection(&g_conCs);
+            if(g_pendingDmg>0){ d=g_pendingDmg; g_pendingDmg=0; sstrcpy(from,g_pendingDmgFrom,sizeof(from)); g_pendingDmgFrom[0]=0; }
+            LeaveCriticalSection(&g_conCs);
+            if(d>0){
+                const uint64_t H_GET_HEALTH=0xEEF059A8E6C27644ULL,H_SET_HEALTH=0x6B76DC1F3AE6E6A8ULL,H_GET_ARMOUR=0x9483AF821605B1D8ULL,H_SET_ARMOUR=0xCEBA04A519F17003ULL,H_IS_DEAD=0x3317DEDB88C95038ULL;
+                int dead=Invoker(H_IS_DEAD).argi(g_localPed).argb(true).reti();
+                if(!dead){
+                    int ar=Invoker(H_GET_ARMOUR).argi(g_localPed).reti();
+                    int soak=ar<d?ar:d;
+                    if(soak>0) Invoker(H_SET_ARMOUR).argi(g_localPed).argi(ar-soak).retv();
+                    int hp=Invoker(H_GET_HEALTH).argi(g_localPed).reti();
+                    int want=hp-(d-soak);
+                    if(want<100) want=0; // GTA: ped health 100..200 alive, below 100 = death
+                    Invoker(H_SET_HEALTH).argi(g_localPed).argi(want).argi(0).argi(0).retv();
+                    char dl[128]; snprintf(dl,sizeof(dl),"%s hit you (-%d)", from[0]?from:"player", d);
+                    pushChatLine(dl,255,120,120);
+                    logf("dmg: took %d from %s (hp %d->%d, armour soak %d)", d, from, hp, want, soak);
+                }
+            }
+        }
         // FiveM-style: ensure a visible remote clone exists for solo testing
         static DWORD lastBotTry=0;
         if(g_shvReady && !g_localTestBotStarted && now-lastBotTry>1000){
             lastBotTry=now; ensureLocalTestBot_SHV();
+        }
+        // v1.9.0 — FiveM behavior: never sit on a loading screen once we control the game.
+        // SHUTDOWN_LOADING_SCREEN for the first 15s post-ready clears story-mode splash/loading cards.
+        {
+            static DWORD killUntil=0;
+            if(g_shvReady && !killUntil) killUntil = now + 15000;
+            if(killUntil && now < killUntil){
+                static DWORD lk=0; if(now-lk>250){ lk=now; Invoker(0x078EBE9809CCD637ULL).retv(); } // SHUTDOWN_LOADING_SCREEN
+            }
         }
         // Phase 6+7: nametags + chat HUD every frame (text natives are cheap)
         drawNametags();
@@ -759,7 +851,7 @@ static void __cdecl shvScriptMain(){
             wait(0);
         }
         // Read local pos @ ~20Hz, send to bridge @ ~10Hz
-        if(now-lastTick>50){lastTick=now;float x=0,y=0,z=0,h=0;Invoker(H_GEC).argi(g_localPed).argb(true).ret3f(x,y,z);h=Invoker(H_GEH).argi(g_localPed).retf();if(x||y||z){g_shvLastPedCoords.x=x;g_shvLastPedCoords.y=y;g_shvLastPedCoords.z=z;g_shvLastHeading=h;}static DWORD ll=0;if(now-ll>5000){ll=now;logf("SHV tick: pos=%.1f,%.1f,%.1f h=%.1f netPeds=%d",x,y,z,h,g_netPedCount);}if(now-lastPosSend>100){lastPosSend=now;sendJson("{\"t\":\"pos\",\"x\":%.3f,\"y\":%.3f,\"z\":%.3f,\"h\":%.2f,\"ped\":%d}",x,y,z,h,g_localPed);}}
+        if(now-lastTick>50){lastTick=now;float x=0,y=0,z=0,h=0;Invoker(H_GEC).argi(g_localPed).argb(true).ret3f(x,y,z);h=Invoker(H_GEH).argi(g_localPed).retf();if(x||y||z){g_shvLastPedCoords.x=x;g_shvLastPedCoords.y=y;g_shvLastPedCoords.z=z;g_shvLastHeading=h;}static DWORD ll=0;if(now-ll>5000){ll=now;logf("SHV tick: pos=%.1f,%.1f,%.1f h=%.1f netPeds=%d",x,y,z,h,g_netPedCount);}if(now-lastPosSend>100){lastPosSend=now;int mhp=Invoker(0xEEF059A8E6C27644ULL).argi(g_localPed).reti(),mar=Invoker(0x9483AF821605B1D8ULL).argi(g_localPed).reti();sendJson("{\"t\":\"pos\",\"x\":%.3f,\"y\":%.3f,\"z\":%.3f,\"h\":%.2f,\"ped\":%d,\"health\":%d,\"armour\":%d}",x,y,z,h,g_localPed,mhp,mar);}}
         // Drain one spawn from queue per tick (process oldest pending).
         EnterCriticalSection(&g_qCs);
         bool hasQ=(g_qTail!=g_qHead);
@@ -967,6 +1059,17 @@ static void handleNetLine(const char*l){int ln=(int)strlen(l);if(ln<5)return;
         g_joinActive=false;
         return;
     }
+    if(strstr(l,"\"dmg\"")){
+        int d=0; jsd(l,"d",&d);
+        int fl=0; const char*fv=jss(l,"from",&fl); char fn[32]="player";
+        if(fv&&fl>0){ memcpy(fn,fv,fl<31?fl:31); fn[fl<31?fl:31]=0; }
+        EnterCriticalSection(&g_conCs);
+        g_pendingDmg += (d<0?0:(d>250?250:d));
+        sstrcpy(g_pendingDmgFrom,fn,sizeof(g_pendingDmgFrom));
+        LeaveCriticalSection(&g_conCs);
+        logf("<- dmg from %s d=%d", fn, d);
+        return;
+    }
     if(strstr(l,"\"conLog\"")){
         int nl=0; const char* nv=jss(l,"msg",&nl); char m2[180]={0}; if(nv&&nl>0){ memcpy(m2,nv,nl<179?nl:179); m2[nl<179?nl:179]=0; }
         if(m2[0]) pushConLine(m2,200,200,200);
@@ -1078,5 +1181,17 @@ static DWORD WINAPI netThread(LPVOID){logf("net start");WSADATA w;WSAStartup(MAK
 static VOID WINAPI delayedShvLoad(PVOID){
     {HMODULE pe[2048];DWORD need=0;if(EnumProcessModules(GetCurrentProcess(),(HMODULE*)pe,sizeof(pe),&need)){DWORD n=need/sizeof(HMODULE);for(DWORD i=0;i<n&&i<512;i++){char nme[MAX_PATH]={0};if(GetModuleFileNameA(pe[i],nme,MAX_PATH)){const char*b=strrchr(nme,'\\');b=b?b+1:nme;if(strstr(b,"ScriptHook")||!_stricmp(b,"dinput8.dll")||!_stricmp(b,"ScriptHookV.dll"))logf("  module[%u]: %s @ %p",i,nme,(void*)pe[i]);}}}}for(int i=0;i<120&&g_running;i++){if(shv::load()){logf("ScriptHookV exports resolved OK");shv::registerScript(shvScriptMain);logf("scriptRegister called (fn=%p)",(void*)shvScriptMain);return;}if(i==0)logf("SHV not found initially (err=%u). Will retry.",(unsigned)GetLastError());Sleep(500);}logf("ScriptHookV not loadable after 60s.");
 }
-BOOL APIENTRY DllMain(HMODULE m,DWORD r,LPVOID){if(r==DLL_PROCESS_ATTACH){DisableThreadLibraryCalls(m);InitializeCriticalSection(&g_qCs);InitializeCriticalSection(&g_npCs);InitializeCriticalSection(&g_sendCs);InitializeCriticalSection(&g_conCs);g_pid=GetCurrentProcessId();char t[MAX_PATH];GetTempPathA(MAX_PATH,t);strcat_s(t,MAX_PATH,"gtamp_hook.log");fclose(fopen(t,"w"));logf("==== GTAMP hook v%s PID=%u ====",HOOK_VER,(unsigned)g_pid);HMODULE hm=GetModuleHandleA("GTA5.exe");if(!hm){logf("ERROR: GTA5.exe not found");return TRUE;}detectBuild(hm);shv::setLogger([](const char*s){logf("%s",s);});shv::setSelfHinst(m);CloseHandle(CreateThread(NULL,0,(LPTHREAD_START_ROUTINE)delayedShvLoad,NULL,0,NULL));g_ovT=CreateThread(NULL,0,overlayThread,NULL,0,NULL);g_netT=CreateThread(NULL,0,netThread,NULL,0,NULL);}else if(r==DLL_PROCESS_DETACH){g_running=false;if(g_ovT){WaitForSingleObject(g_ovT,3000);CloseHandle(g_ovT);}if(g_netT){WaitForSingleObject(g_netT,3000);CloseHandle(g_netT);}DeleteCriticalSection(&g_qCs);DeleteCriticalSection(&g_npCs);DeleteCriticalSection(&g_sendCs);DeleteCriticalSection(&g_conCs);logf("unloaded");}return TRUE;}
+BOOL APIENTRY DllMain(HMODULE m,DWORD r,LPVOID){if(r==DLL_PROCESS_ATTACH){DisableThreadLibraryCalls(m);
+    // v1.9.0 — FiveM parity (code/client/launcher/Main.cpp): pin the *system* D3D/DXGI DLLs early so
+    // a search-path/re-hooked variant can never resolve first → classic ERR_GFX_D3D_INIT prevention.
+    {
+        wchar_t sysd[MAX_PATH]={0}; GetSystemDirectoryW(sysd,MAX_PATH);
+        const wchar_t* pin[]={L"d3d11.dll",L"dxgi.dll",L"d3d9.dll",L"d3d10.dll",L"d3d10_1.dll",L"opengl32.dll"};
+        for(int i=0;i<6;i++){
+            wchar_t fp[MAX_PATH]={0};
+            _snwprintf(fp,MAX_PATH-1,L"%s\\%s",sysd,pin[i]);
+            if(!GetModuleHandleW(pin[i])) LoadLibraryW(fp);
+        }
+    }
+    InitializeCriticalSection(&g_qCs);InitializeCriticalSection(&g_npCs);InitializeCriticalSection(&g_sendCs);InitializeCriticalSection(&g_conCs);g_pid=GetCurrentProcessId();char t[MAX_PATH];GetTempPathA(MAX_PATH,t);strcat_s(t,MAX_PATH,"gtamp_hook.log");fclose(fopen(t,"w"));logf("==== GTAMP hook v%s PID=%u ====",HOOK_VER,(unsigned)g_pid);HMODULE hm=GetModuleHandleA("GTA5.exe");if(!hm){logf("ERROR: GTA5.exe not found");return TRUE;}detectBuild(hm);shv::setLogger([](const char*s){logf("%s",s);});shv::setSelfHinst(m);CloseHandle(CreateThread(NULL,0,(LPTHREAD_START_ROUTINE)delayedShvLoad,NULL,0,NULL));g_ovT=CreateThread(NULL,0,overlayThread,NULL,0,NULL);g_netT=CreateThread(NULL,0,netThread,NULL,0,NULL);}else if(r==DLL_PROCESS_DETACH){g_running=false;if(g_ovT){WaitForSingleObject(g_ovT,3000);CloseHandle(g_ovT);}if(g_netT){WaitForSingleObject(g_netT,3000);CloseHandle(g_netT);}DeleteCriticalSection(&g_qCs);DeleteCriticalSection(&g_npCs);DeleteCriticalSection(&g_sendCs);DeleteCriticalSection(&g_conCs);logf("unloaded");}return TRUE;}
 extern "C" __declspec(dllexport) const char* gtamp_version(){return "GTAMP Hook v" HOOK_VER;}

@@ -80,6 +80,12 @@ app.post('/api/servers/report', (req, res) => {
   res.json({ ok: true, id: srv.id });
 });
 
+// v1.9.0 — component update channel consumed by the launcher's "Updating components" stage
+const LAUNCHER_VERSION = '1.9.0';
+app.get('/api/launcher/version', (req, res) => {
+  res.json({ version: LAUNCHER_VERSION, url: '/download/GTAMP-Launcher-v' + LAUNCHER_VERSION + '.exe' });
+});
+
 app.get('/api/servers/live', (req, res) => {
   const cutoff = Date.now() - (1000 * 60 * 5); // 5 min stale
   const live = servers().filter(s => (s.lastSeen || 0) > cutoff).map(s => ({
@@ -106,7 +112,8 @@ app.get('/api/launcher/active', (req, res) => {
 // ---------- Download ----------
 app.get('/download/:file', (req, res) => {
   const file = path.basename(req.params.file);
-  const p = path.join(__dirname, '..', 'GTAMP-Launcher-' + file);
+  const name = file.startsWith('GTAMP-Launcher-') ? file : 'GTAMP-Launcher-' + file;
+  const p = path.join(__dirname, '..', name);
   if (require('fs').existsSync(p)) return res.download(p);
   res.status(404).send('Not found - run `npm run dist` in gtalauncher and place the exe at repo root.');
 });

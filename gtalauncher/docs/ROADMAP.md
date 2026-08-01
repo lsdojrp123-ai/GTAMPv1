@@ -41,8 +41,17 @@
 - **T chat** in-game (FiveM keybinding); F9 toggles the debug HUD.
 - **Tray/background**: GTAMP keeps running in the tray while you play; quitting GTA returns you to the launcher; `disconnectSession` cleans the session from console/launcher.
 
-## ▶ NEXT — Phase 8: Health/stats sync + basic damage (Low risk)
-Sync real ped health in the `pos` packet (field exists, hook sends hardcoded 200), show real HP in nametags, apply damage between players.
+## v1.9.0 — FiveM parity pass (study: citizenfx/fivem source) — current packaged release
+- **ERR_GFX_D3D_INIT fix** — root cause was injecting into GTA5.exe while D3D was still initializing. FiveM's launcher never touches the game until its own D3D is up; we now mirror that contract: connect flow waits for the **game window** (== gfx init done) + a settle grace before injecting. DllMain pins system d3d11/dxgi DLLs first (their `Main.cpp` "must load a d3d11.dll before anything else"). Loading screen kill via `SHUTDOWN_LOADING_SCREEN` → straight into gameplay like FiveM.
+- **FiveM-ordered 13-step connect flow** — runtime init → ownership → game files → environment prep (settings.xml forced to DirectX 11 + HDR off, stale GTA procs killed) → updating components (`/api/launcher/version`) → Rockstar services → launch → window wait → settle → inject → link → server handshake → session.
+- **ShadowPlay parity** — NvNode local API (port+secret from `nodejs.json`, `X_LOCAL_SECURITY_COOKIE` header, GET/POST `ShadowPlay/v.1.0/Launch`) disables ShadowPlay for the session and restores it on quit, exactly like `DisableNVSP.cpp`.
+- **Phase 8 shipped** — health/armour now sync in the pos packet (real natives, not hardcoded 200); damage routing: shooter reports `hit` → server forwards `damage` to victim → victim applies armour-first then health; owner HP mirrors onto every clone each frame; owner death kills the clone; dead clone + live owner respawns; nametag HP% fixed for GTA's 100–200 range; chat feedback both sides ("You hit X (-25)" / "X hit you (-25)").
+- **Console upgrades** (FiveM conhost-style): `status`, `players` added.
+- **Website**: `/api/launcher/version` endpoint + `launcher-version.json` in the static build.
+- See [FIVEM-PARITY.md](./FIVEM-PARITY.md) for the full subsystem map.
+
+## ▶ NEXT — Phase 9: Vehicle sync (Medium risk)
+`vehEnter/vehExit/vehCreate/vehDelete` stubs exist at fxserver; `inVeh` field already relayed in playerPos.
 
 ## Then
 | Phase | Feature | Risk |
