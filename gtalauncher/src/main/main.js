@@ -402,6 +402,16 @@ function ensureHookTcpServer() {
               });
             }
             if (!mpGotOtherPlayer) startSoloBot();
+          } else if (m.t === 'consoleCmd') {
+            // v1.8.0 — commands typed into the in-game F8 console
+            if (m.cmd === 'connect' && m.arg) {
+              writeLaunchDiag(['consoleCmd: connect ' + m.arg]);
+              const r = startGameConnect(String(m.arg));
+              if (!r.ok) hookBroadcast({ t: 'conLog', msg: 'connect failed: ' + (r.error || 'unknown') });
+            } else if (m.cmd === 'disconnect') {
+              disconnectSession('console command');
+              hookBroadcast({ t: 'joinEnd', ok: 0 });
+            }
           } else if (m.t === 'chat') {
             const raw = (m.msg || '').toString().trim();
             const body = raw.startsWith('/') ? raw.slice(1) : raw;
@@ -795,7 +805,7 @@ function verifyGtaOwnership(dir) {
 }
 
 // ---------- Loading window: startup splash + server connect (v1.7.0) ----------
-const LAUNCHER_VER = '1.7.1';
+const LAUNCHER_VER = '1.8.0';
 function openLoading(mode, opts = {}) {
   closeLoading();
   loadingWin = new BrowserWindow({
@@ -1057,6 +1067,7 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
       stopGtaExitWatch();
       try { if (injectorProc && !injectorProc.killed) injectorProc.kill(); } catch {}
       if (!silent) { try { discordRpc.setInLauncher(); } catch {} }
+      try { hookBroadcast({ t: 'joinEnd', ok: 0 }); } catch {}
       closeLoading();
       if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
     }
@@ -1081,6 +1092,7 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
   const fail = (i, title, detail, actions) => {
     setStep(i, 'failed');
     sendLoading('error', { title, detail, actions: actions || [{ id: 'retry', label: 'Retry' }, { id: 'cancel', label: 'Cancel' }] });
+    try { hookBroadcast({ t: 'joinFail', msg: title }); } catch {}
   };
 
   // Net endpoints first, so the hook has somewhere to land
@@ -1170,6 +1182,8 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
   if (ctl.cancelled) return;
   if (!injRes.ok) { fail(4, 'Injection failed', injRes.error || 'unknown'); return; }
   setStep(4, 'done');
+  // From here the game itself shows GTAMP's FiveM-style in-game connect panel
+  try { hookBroadcast({ t: 'joinBegin', server: serverName }); } catch {}
 
   // STEP 5 — hook link
   setStep(5, 'active', 'Waiting for the hook to report in…');
@@ -1187,17 +1201,20 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
 
   // STEP 6 — server handshake
   setStep(6, 'active', 'Handshaking with ' + effectiveAddr + '…');
+  try { hookBroadcast({ t: 'joinStage', stage: 'Handshaking with server' }); } catch {}
   const welcomeOk = await ctl.waitFor('welcome', 15000);
   if (ctl.cancelled) return;
   setStep(6, 'done', welcomeOk ? 'connected' : 'server unreachable — continuing offline');
 
   // STEP 7 — spawn
   setStep(7, 'active', 'Streaming world state…');
+  try { hookBroadcast({ t: 'joinStage', stage: 'Loading session — streaming world' }); } catch {}
   await ctl.waitFor('spawn', 15000);
   if (ctl.cancelled) return;
   setStep(7, 'done');
 
   loadingStatus('IN SESSION — HAVE FUN!', 'GTAMP keeps running in the background', 1);
+  try { hookBroadcast({ t: 'joinEnd', ok: 1 }); } catch {}
   await sleep(1500);
   closeLoading();
   try { tray && tray.setToolTip('GTAMP — connected to ' + serverName); } catch {}
@@ -1352,7 +1369,8 @@ ipcMain.handle('master:getServers', async () => new Promise(resolve => {
 }));
 
 // ---------- Launch GTA + inject ----------
-ipcMain.handle('game:launch', (_e, {serverAddr} = {}) => {
+// Shared connect entry — used by the UI button AND the in-game F8 console (`connect <ip:port>`)
+function startGameConnect(serverAddr) {
   if (!config.gtaPath) return {ok:false, error:'GTA V path not set. Go to Settings.'};
   const hasGTA = fs.existsSync(path.join(config.gtaPath,'GTA5.exe')) || fs.existsSync(path.join(config.gtaPath,'PlayGTAV.exe'));
   if (!hasGTA) return {ok:false, error:'No GTA V installation found at '+config.gtaPath};
@@ -1409,7 +1427,22 @@ ipcMain.handle('game:launch', (_e, {serverAddr} = {}) => {
   saveConfig(config);
   runConnectFlow({ launch, serverAddr, effectiveAddr });
   return { ok: true, launched: launch.kind, server: effectiveAddr, launcherType: lt, connecting: true };
-});
+}
+ipcMain.handle('game:launch', (_e, {serverAddr} = {}) => startGameConnect(serverAddr));
+
+// v1.8.0 — leave the current session (F8 console 'disconnect'/'quit', launcher Disconnect)
+function disconnectSession(reason) {
+  writeLaunchDiag(['disconnectSession: ' + (reason || '')]);
+  try { if (mpSpawned) mpSend({ t: 'quit' }); } catch (e) { writeLaunchDiag(['quit send: ' + e.message]); }
+  mpSpawned = false; mpGotOtherPlayer = false; mpNetId = null;
+  try { mpRemote.clear(); } catch {}
+  try { hookBroadcast({ t: 'netPedClear' }); } catch {}
+  try { hookBroadcast({ t: 'conLog', msg: 'disconnected from server' + (reason ? ' (' + reason + ')' : '') }); } catch {}
+  try { discordRpc.setInLauncher(); } catch {}
+  try { tray && tray.setToolTip('GTAMP'); } catch {}
+  if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus(); mainWindow.webContents.send('game:closed', {}); }
+}
+ipcMain.handle('game:disconnect', (_e) => { disconnectSession('launcher'); return { ok: true }; });
 
 function addToHistory(entry) {
   config.history = config.history || [];

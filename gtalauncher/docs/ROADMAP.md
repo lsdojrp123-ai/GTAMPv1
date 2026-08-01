@@ -30,7 +30,16 @@
 | 6 | **Remote player lifecycle, FiveM-style** — auto-create clone peds on join, despawn on leave/timeout, nametags `[id] name + HP%`, map blips, smooth lerp, ~320 m culling | ✅ Done | `dllmain.cpp` `drawNametags`, `addPlayerBlip`, `netPedClear`, `HOOK_VER "1.6.0"` |
 | 7 | **F8 chat sync** — F8 opens input, type, Enter sends; server relays to all clients; colored HUD lines + join/leave notices | ✅ Done | hook `submitChat`→`main.js`→`fxserver _handleChat`→broadcast→`pushChatLine`/`drawChatUI` |
 
-**Phases 1–7 are complete in the code.** If F8 chat didn't work on your machine, the almost-certain cause was the old **v1.5.2 hook** loading from a stale installed copy — your pasted log showed `GTAMP hook v1.5.2`. The hook DLL in `dist-bin/` and the packaged launcher on GitHub are both v1.6.0. Fresh install of the current `GTAMP-Launcher-v1.6.0.exe` fixes it.
+**Phases 1–7 are complete in the code.** If F8 chat didn't work on your machine, the almost-certain cause was the old **v1.5.2 hook** loading from a stale installed copy — fresh install of the current launcher fixes it.
+
+### v1.8.0 — FiveM-style join UX (current packaged release)
+- **Startup splash** pops instantly (`loading.html`): locating GTA V → verifying ownership → Rockstar services → launcher ready.
+- **Ownership verification** before anything runs (`verifyGtaOwnership`): `GTA5.exe`/`PlayGTAV.exe`/`GTA5_Enhanced.exe`, `update\update.rpf` >200 MB, Steam/Epic/Rockstar platform detection.
+- **Connect flow** (`runConnectFlow`): 8-step loading window — ownership → platform → start GTA → wait for GTA5.exe → inject → hook link → handshake → spawn — with retry/cancel at every failure.
+- **In-game connect panel**: once the hook lands, a FiveM-style centered card drawn over the game ("GTAMP / CONNECTING / server / stage + spinner") until you spawn (`joinBegin`/`joinStage`/`joinEnd`/`joinFail` over the hook bridge).
+- **F8 console** works even before ScriptHookV loads (GDI overlay): `help`, `connect <ip:port>`, `disconnect`, `quit`, `version`.
+- **T chat** in-game (FiveM keybinding); F9 toggles the debug HUD.
+- **Tray/background**: GTAMP keeps running in the tray while you play; quitting GTA returns you to the launcher; `disconnectSession` cleans the session from console/launcher.
 
 ## ▶ NEXT — Phase 8: Health/stats sync + basic damage (Low risk)
 Sync real ped health in the `pos` packet (field exists, hook sends hardcoded 200), show real HP in nametags, apply damage between players.

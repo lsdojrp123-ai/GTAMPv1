@@ -1,4 +1,4 @@
-/* GTAMP Hook v1.6.0 - Phase 6 FiveM-like remote players + Phase 7 F8 chat. */
+/* GTAMP Hook v1.8.0 - Phase 6 remote players + Phase 7 chat + v1.8.0 FiveM-style join UX: in-game connect panel, F8 console (pre-SHV), T chat. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <winsock2.h>
@@ -17,7 +17,7 @@
 #pragma comment(lib,"version.lib")
 #pragma comment(lib,"winmm.lib")
 
-#define HOOK_VER "1.7.0"
+#define HOOK_VER "1.8.0"
 #define OVERLAY_KEY RGB(255,0,255)
 #define OV_CLASS "GTAMP_OV160"
 static volatile bool g_running=true;
@@ -27,6 +27,19 @@ static DWORD g_pid=0;
 static SOCKET g_sock=INVALID_SOCKET;
 static bool g_vis=true;
 static char g_ver[64]={0};
+// v1.8.0 — FiveM-style in-game join panel + F8 console (works before SHV loads)
+static bool g_joinActive=false, g_joinFailed=false;
+static char g_joinServer[64]={0};
+static char g_joinStage[96]={0};
+static DWORD g_joinT0=0;
+static bool g_consoleOpen=false;
+static char g_conInput[192]={0};
+static int g_conInputLen=0;
+#define CON_LOG_MAX 42
+struct ConLine{char text[220]; unsigned char r,g,b;};
+static ConLine g_conLog[CON_LOG_MAX];
+static int g_conLogN=0;
+static CRITICAL_SECTION g_conCs;
 struct Vec3{float x,y,z;};
 static uintptr_t g_base=0; static uint32_t g_size=0;
 struct Found{bool found;uintptr_t ped;Vec3 pos;float heading;int hp;uintptr_t world;char why[128];char err[256];uint32_t tries;uint32_t cands;} g_f={0};
@@ -72,6 +85,7 @@ struct NpCmd{int op;char id[32];char name[32];char model[64];float x,y,z,h;};
 static void logf(const char* fmt,...); // forward decl
 static void sendJson(const char* fmt,...); // forward decl (used by chat before def)
 static void sstrcpy(char*dst,const char*src,size_t sz); // forward decl
+static void pushConLine(const char* text, unsigned char r, unsigned char g, unsigned char b); // forward decl
 static SpawnReq g_spawnQ[SPAWN_Q_SIZE];
 static NpCmd g_npQ[NP_Q_SIZE];
 static volatile LONG g_qHead=0,g_qTail=0;
@@ -99,6 +113,52 @@ static void pushChatLine(const char* text, unsigned char r=220, unsigned char g=
     memset(L,0,sizeof(*L));
     { size_t i=0; for(;i+1<sizeof(L->text)&&text[i];i++) L->text[i]=text[i]; L->text[i]=0; }
     L->born = timeGetTime(); L->r=r; L->g=g; L->b=b;
+    pushConLine(text, r, g, b); // mirror into the F8 console scrollback
+}
+// v1.8.0 — console ring buffer + command processor (FiveM-style F8)
+static void pushConLine(const char* text, unsigned char r, unsigned char g, unsigned char b){
+    if(!text||!*text) return;
+    EnterCriticalSection(&g_conCs);
+    if(g_conLogN >= CON_LOG_MAX){
+        memmove(&g_conLog[0], &g_conLog[1], sizeof(ConLine)*(CON_LOG_MAX-1));
+        g_conLogN = CON_LOG_MAX-1;
+    }
+    ConLine* L = &g_conLog[g_conLogN++];
+    memset(L,0,sizeof(*L));
+    { size_t i=0; for(;i+1<sizeof(L->text)&&text[i];i++) L->text[i]=text[i]; L->text[i]=0; }
+    L->r=r; L->g=g; L->b=b;
+    LeaveCriticalSection(&g_conCs);
+}
+static void runConsoleCommand(const char* raw){
+    if(!raw||!*raw) return;
+    char cmd[32]={0}, arg[160]={0};
+    int i=0; const char*p=raw; while(*p==' ')p++;
+    while(p[i] && p[i]!=' ' && i<31){ cmd[i]=p[i]; i++; } cmd[i]=0;
+    while(p[i]==' ') i++;
+    sstrcpy(arg, p+i, sizeof(arg));
+    // sanitize arg so it can't break our JSON
+    for(int k=0; arg[k]; k++){ if(arg[k]=='\"'||arg[k]=='\\'||arg[k]=='{'||arg[k]=='}') arg[k]=' '; }
+    { char echo[240]; snprintf(echo,sizeof(echo),"> %s", raw); pushConLine(echo,150,150,155); }
+    if(!_stricmp(cmd,"help")){
+        pushConLine("commands: help · clear · connect <ip:port> · disconnect · version · credit", 200,220,255);
+    } else if(!_stricmp(cmd,"clear")){
+        EnterCriticalSection(&g_conCs); g_conLogN=0; LeaveCriticalSection(&g_conCs);
+    } else if(!_stricmp(cmd,"quit")){
+        sendJson("{\"t\":\"consoleCmd\",\"cmd\":\"disconnect\"}");
+        pushConLine("leaving session — returning to launcher…", 140,200,255);
+        g_consoleOpen=false; g_conInput[0]=0; g_conInputLen=0;
+    } else if(!_stricmp(cmd,"disconnect")){
+        sendJson("{\"t\":\"consoleCmd\",\"cmd\":\"disconnect\"}");
+        pushConLine("disconnecting from session…", 140,200,255);
+    } else if(!_stricmp(cmd,"connect")){
+        if(!arg[0]) pushConLine("usage: connect 127.0.0.1:22005", 255,180,120);
+        else { sendJson("{\"t\":\"consoleCmd\",\"cmd\":\"connect\",\"arg\":\"%s\"}", arg); pushConLine("connecting…", 140,200,255); }
+    } else if(!_stricmp(cmd,"version")){
+        char v[96]; snprintf(v,sizeof(v),"GTAMP hook v%s — Rockstar-safe MP client", HOOK_VER); pushConLine(v,255,220,120);
+    } else if(!_stricmp(cmd,"credit")){ pushConLine("GTAMP — our own netcode, no relation to FiveM/Cfx.re" , 200,200,200); }
+    else {
+        pushConLine("unknown command — type 'help'", 255,160,120);
+    }
 }
 static void chatEscapeJson(const char* in, char* out, size_t outSz){
     size_t o=0;
@@ -494,7 +554,7 @@ static void drawChatUI(){
         char buf[CHAT_INPUT_MAX+8];
         snprintf(buf, sizeof(buf), "> %s_", g_chatInput);
         drawText2d(buf, 0.02f, 0.93f, 0.40f, 255, 255, 120, 255, false);
-        drawText2d("T / F8 chat | Enter send | Esc cancel", 0.02f, 0.96f, 0.28f, 180, 180, 180, 200, false);
+        drawText2d("T chat | Enter send | Esc cancel · F8 console", 0.02f, 0.96f, 0.28f, 180, 180, 180, 200, false);
     }
 }
 
@@ -574,7 +634,7 @@ static void __cdecl shvScriptMain(){
     const uint64_t H_PLAYER_ID=0x4F8644AF03D0E0D6ULL,H_PPID=0xD80958FC74E988A6ULL,H_GEC=0x3FEF770D40960D5AULL,H_GEH=0xE83D4F9BA2A38914ULL;
     wait(5000);logf("SHV: initial 5s wait done.");int pidx=0;DWORD lastTick=0,lastPosSend=0,lastNetTick=0;DWORD t0=timeGetTime();
     while(g_running){wait(0);DWORD now=timeGetTime();
-        if(!g_localPed){static DWORD lt=0;if(now-lt>500){lt=now;pidx=Invoker(H_PLAYER_ID).reti();int p=Invoker(H_PPID).reti();if(p&&timeGetTime()-t0>8000){g_localPed=p;g_shvReady=true;logf("SHV READY: playerIdx=%d ped=0x%X (uptime=%ums) netPeds=%d",pidx,p,(unsigned)(timeGetTime()-t0),g_netPedCount);strcpy_s(g_f.err,"Scanning mem for ped...");sendJson("{\"t\":\"ready\",\"ped\":%d,\"uptime\":%lu}",p,(unsigned long)(timeGetTime()-t0));}else{static DWORD ll=0;if(now-ll>3000){ll=now;logf("SHV: waiting for ped... t=%ums p=%d",(unsigned)(timeGetTime()-t0),p);}}}continue;}
+        if(!g_localPed){static DWORD lt=0;if(now-lt>500){lt=now;pidx=Invoker(H_PLAYER_ID).reti();int p=Invoker(H_PPID).reti();if(p&&timeGetTime()-t0>8000){g_localPed=p;g_shvReady=true;logf("SHV READY: playerIdx=%d ped=0x%X (uptime=%ums) netPeds=%d",pidx,p,(unsigned)(timeGetTime()-t0),g_netPedCount);strcpy_s(g_f.err,"Scanning mem for ped...");sendJson("{\"t\":\"ready\",\"ped\":%d,\"uptime\":%lu}",p,(unsigned long)(timeGetTime()-t0));if(g_gta&&IsWindow(g_gta)){SetForegroundWindow(g_gta);logf("brought GTA window to front");}}else{static DWORD ll=0;if(now-ll>3000){ll=now;logf("SHV: waiting for ped... t=%ums p=%d",(unsigned)(timeGetTime()-t0),p);}}}continue;}
         // Apply remote-ped movement every tick (smooth)
         if(now-lastNetTick>16){lastNetTick=now;processNetPeds(now);tickLocalTestBot_SHV(now);}
         // FiveM-style: ensure a visible remote clone exists for solo testing
@@ -588,20 +648,14 @@ static void __cdecl shvScriptMain(){
         // F8 (console) or T (chat, like FiveM) opens chat input — edge-triggered.
         // Works during server loading too: hook thread is independent of the game.
         {
-            static bool f8Was=false, tWas=false, escWas=false, retWas=false, bkWas=false;
-            bool f8 = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
+            // v1.8.0: F8 = console (owned by the overlay thread, works pre-SHV). T = chat (FiveM-style), suppressed while console is open.
+            static bool tWas=false, escWas=false, retWas=false, bkWas=false;
             bool tk = (GetAsyncKeyState(0x54) & 0x8000) != 0; // 'T'
-            if(!g_chatOpen && tk && !tWas){
+            if(!g_consoleOpen && !g_chatOpen && tk && !tWas){
                 g_chatOpen = true; g_chatOpenAt=now; g_chatInput[0]=0; g_chatInputLen=0; logf("chat: opened (T)");
             }
             tWas=tk;
-            if(f8 && !f8Was){
-                g_chatOpen = !g_chatOpen;
-                if(g_chatOpen){ g_chatOpenAt=now; g_chatInput[0]=0; g_chatInputLen=0; logf("chat: opened (F8)"); }
-                else { logf("chat: closed"); }
-                Sleep(0);
-            }
-            f8Was=f8;
+            if(g_consoleOpen && g_chatOpen) g_chatOpen=false;
             if(g_chatOpen){
                 bool esc=(GetAsyncKeyState(VK_ESCAPE)&0x8000)!=0;
                 if(esc && !escWas){ g_chatOpen=false; g_chatInput[0]=0; g_chatInputLen=0; }
@@ -742,20 +796,136 @@ static void __cdecl shvScriptMain(){
 struct EnumData{DWORD pid;HWND wnd;};
 static BOOL CALLBACK enumCb(HWND w,LPARAM lp){EnumData*d=(EnumData*)lp;DWORD pid;GetWindowThreadProcessId(w,&pid);if(pid==d->pid&&IsWindowVisible(w)&&!GetParent(w)){RECT r;GetWindowRect(w,&r);int a=(r.right-r.left)*(r.bottom-r.top);RECT rr;if(!d->wnd||(GetWindowRect(d->wnd,&rr)&&a>(rr.right-rr.left)*(rr.bottom-rr.top)))d->wnd=w;}return TRUE;}
 static HWND findGtaWnd(){EnumData d={g_pid,NULL};EnumWindows(enumCb,(LPARAM)&d);return d.wnd;}
+static void ovText(HDC dc, HFONT f, int x, int y, const char* s, COLORREF c){
+    SelectObject(dc,f); SetTextColor(dc,c); TextOutA(dc,x,y,s,(int)strlen(s));
+}
+// v1.8.0 — overlay painter priority: F8 console > join panel > debug HUD (F9)
 static LRESULT CALLBACK wndProc(HWND w,UINT m,WPARAM a,LPARAM b){
-    if(m==WM_PAINT){PAINTSTRUCT ps;HDC dc=BeginPaint(w,&ps);HBRUSH kb=CreateSolidBrush(OVERLAY_KEY);RECT rc;GetClientRect(w,&rc);FillRect(dc,&rc,kb);DeleteObject(kb);RECT br={8,8,700,240};HBRUSH b2=CreateSolidBrush(RGB(18,10,2));FillRect(dc,&br,b2);DeleteObject(b2);HPEN pn=CreatePen(PS_SOLID,1,RGB(240,120,40));HGDIOBJ po=SelectObject(dc,pn);MoveToEx(dc,br.left,br.top,NULL);LineTo(dc,br.right,br.top);LineTo(dc,br.right,br.bottom);LineTo(dc,br.left,br.bottom);LineTo(dc,br.left,br.top);SelectObject(dc,po);DeleteObject(pn);SetBkMode(dc,TRANSPARENT);
-    HFONT f1=CreateFontA(22,0,0,0,FW_BOLD,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,"Segoe UI");HFONT f2=CreateFontA(13,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,"Segoe UI");HFONT of=(HFONT)SelectObject(dc,f1);SetTextColor(dc,RGB(240,120,40));char hdr[80];snprintf(hdr,sizeof(hdr),"GTAMP v%s  -  Phase 6 remote players (FiveM-style)",HOOK_VER);TextOutA(dc,20,16,hdr,(int)strlen(hdr));SelectObject(dc,f2);char ln[320];SetTextColor(dc,RGB(220,224,232));snprintf(ln,sizeof(ln),"Build: %s   F8 chat | F9 hud | players sync like FiveM",g_ver[0]?g_ver:"?");TextOutA(dc,20,46,ln,(int)strlen(ln));
-    if(shv::loaded()){COLORREF c=g_shvReady?RGB(120,220,120):RGB(255,200,80);SetTextColor(dc,c);snprintf(ln,sizeof(ln),"ScriptHookV: OK  script=%s  spawns=%d  remotePeds=%d",g_shvReady?"ready":"starting up",g_shvSpawnCount,g_netPedCount);}else{SetTextColor(dc,RGB(255,160,80));snprintf(ln,sizeof(ln),"ScriptHookV.dll NOT FOUND");}TextOutA(dc,20,64,ln,(int)strlen(ln));
-    if(g_shvReady&&g_f.found){SetTextColor(dc,RGB(180,220,255));snprintf(ln,sizeof(ln),"PED @ %p  (+0x90)  mem: %.1f,%.1f,%.1f",(void*)g_f.ped,g_f.pos.x,g_f.pos.y,g_f.pos.z);TextOutA(dc,20,88,ln,(int)strlen(ln));SetTextColor(dc,RGB(180,255,180));snprintf(ln,sizeof(ln),"SHV pos: %.1f,%.1f,%.1f  h=%.1f deg  hp=%d",g_shvLastPedCoords.x,g_shvLastPedCoords.y,g_shvLastPedCoords.z,g_shvLastHeading,g_f.hp);TextOutA(dc,20,108,ln,(int)strlen(ln));SetTextColor(dc,RGB(180,180,180));TextOutA(dc,20,128,g_f.why,(int)strlen(g_f.why));if(g_shvMsg[0]){SetTextColor(dc,RGB(255,220,120));TextOutA(dc,20,148,g_shvMsg,(int)strlen(g_shvMsg));}SetTextColor(dc,RGB(140,200,255));snprintf(ln,sizeof(ln),"Bridge: %s   Remote players: %d",g_sock!=INVALID_SOCKET?"connected":"waiting",g_netPedCount);TextOutA(dc,20,180,ln,(int)strlen(ln));
-        // Phase 6: list remote names under bridge line
-        { int yy=198; SetTextColor(dc,RGB(200,220,255));
-          for(int i=0;i<NET_PED_MAX && yy<230;i++){ if(!g_netPeds[i].used) continue;
-            char rl[96]; snprintf(rl,sizeof(rl), "  %s  ped=%d  hp=%d", g_netPeds[i].name[0]?g_netPeds[i].name:g_netPeds[i].id, g_netPeds[i].ped, g_netPeds[i].health);
-            TextOutA(dc,20,yy,rl,(int)strlen(rl)); yy+=14; } }}else{SetTextColor(dc,RGB(255,200,120));TextOutA(dc,20,88,g_shvReady?"Local ped: scanning memory...":"Waiting for GTA to load...",g_shvReady?33:29);SetTextColor(dc,RGB(180,180,180));TextOutA(dc,20,108,g_f.err,(int)strlen(g_f.err));}
-    SetTextColor(dc,RGB(220,180,90));TextOutA(dc,20,200,"F8 chat | F9 overlay | F11 spawn cop 3m ahead",48);SelectObject(dc,of);DeleteObject(f1);DeleteObject(f2);EndPaint(w,&ps);return 0;}if(m==WM_DESTROY){g_ov=NULL;return 0;}return DefWindowProcA(w,m,a,b);
+    if(m==WM_PAINT){
+        PAINTSTRUCT ps; HDC dc=BeginPaint(w,&ps);
+        HBRUSH kb=CreateSolidBrush(OVERLAY_KEY); RECT rc; GetClientRect(w,&rc); FillRect(dc,&rc,kb); DeleteObject(kb);
+        SetBkMode(dc,TRANSPARENT);
+        int W=rc.right-rc.left, H=rc.bottom-rc.top;
+        HFONT fT=CreateFontA(30,0,0,0,FW_BOLD,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,"Segoe UI");
+        HFONT fH=CreateFontA(22,0,0,0,FW_BOLD,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,"Segoe UI");
+        HFONT fN=CreateFontA(15,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,"Segoe UI");
+        HFONT fS=CreateFontA(13,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,"Segoe UI");
+        if(g_consoleOpen){
+            int ch=H*55/100;
+            RECT cr={0,0,W,ch}; HBRUSH pb=CreateSolidBrush(RGB(13,14,17)); FillRect(dc,&cr,pb); DeleteObject(pb);
+            HPEN pn=CreatePen(PS_SOLID,2,RGB(244,5,82)); HGDIOBJ po=SelectObject(dc,pn);
+            MoveToEx(dc,0,ch-1,NULL); LineTo(dc,W,ch-1); SelectObject(dc,po); DeleteObject(pn);
+            ovText(dc,fT,20,12,"GTAMP",RGB(244,5,82));
+            ovText(dc,fH,128,20,"CONSOLE",RGB(240,240,240));
+            ovText(dc,fS,W<300?20:W-260,26,"[F8] close · type 'help'",RGB(150,150,160));
+            int maxLines=(ch-90)/17; if(maxLines<1)maxLines=1;
+            int count=g_conLogN<maxLines?g_conLogN:maxLines;
+            EnterCriticalSection(&g_conCs);
+            for(int i=0;i<count;i++){
+                ConLine*L=&g_conLog[g_conLogN-count+i];
+                ovText(dc,fN,20,56+i*17,L->text,RGB(L->r,L->g,L->b));
+            }
+            LeaveCriticalSection(&g_conCs);
+            char ib[224]; bool blink=((timeGetTime()/500)&1)!=0;
+            snprintf(ib,sizeof(ib),"> %s%s", g_conInput, blink?"_":" ");
+            ovText(dc,fN,20,ch-30,ib,RGB(255,255,120));
+        }
+        else if(g_joinActive){
+            int cw=(W<600)?W-40:560, chh=300;
+            int cx=(W-cw)/2, cy=(H-chh)/3; if(cy<8)cy=8;
+            RECT card={cx,cy,cx+cw,cy+chh}; HBRUSH cb2=CreateSolidBrush(RGB(15,16,20)); FillRect(dc,&card,cb2); DeleteObject(cb2);
+            RECT bar={cx,cy,cx+cw,cy+4}; HBRUSH bb2=CreateSolidBrush(RGB(244,5,82)); FillRect(dc,&bar,bb2); DeleteObject(bb2);
+            ovText(dc,fT,cx+28,cy+26,"GTAMP",RGB(244,5,82));
+            ovText(dc,fS,cx+28,cy+58,g_joinFailed?"CONNECTION FAILED":"CONNECTING",RGB(150,150,160));
+            ovText(dc,fH,cx+28,cy+92,g_joinServer[0]?g_joinServer:"GTAMP Server",RGB(240,240,240));
+            static const char* dots[4]={".   ","..  ","... ","    "};
+            char st[128]; snprintf(st,sizeof(st),"%s%s", g_joinStage, g_joinFailed?"":dots[(timeGetTime()/350)%4]);
+            ovText(dc,fN,cx+28,cy+128,st,g_joinFailed?RGB(255,110,110):RGB(200,205,215));
+            int el=(int)((timeGetTime()-g_joinT0)/1000);
+            char et[64]; snprintf(et,sizeof(et),"%ds elapsed",el);
+            ovText(dc,fS,cx+28,cy+152,et,RGB(120,125,135));
+            if(g_joinFailed) ovText(dc,fS,cx+28,cy+180,"Retry from the GTAMP launcher window",RGB(255,200,80));
+            else ovText(dc,fS,cx+28,cy+180,"GTAMP keeps running in the background",RGB(120,125,135));
+            ovText(dc,fS,cx+28,cy+chh-46,"F8 console · T chat in game",RGB(140,140,150));
+            int bw=cw-56, seg=bw/8; if(seg<6)seg=6;
+            int on=(int)((timeGetTime()/180)%8);
+            for(int i2=0;i2<8;i2++){
+                RECT sg={cx+28+i2*seg,cy+chh-24,cx+28+i2*seg+seg-6,cy+chh-18};
+                HBRUSH sb=CreateSolidBrush(g_joinFailed?RGB(60,30,30):(i2<=on?RGB(244,5,82):RGB(35,36,42)));
+                FillRect(dc,&sg,sb); DeleteObject(sb);
+            }
+        }
+        else if(g_vis){
+            RECT br={8,8,700,240}; HBRUSH b2=CreateSolidBrush(RGB(18,10,2)); FillRect(dc,&br,b2); DeleteObject(b2);
+            HPEN pn=CreatePen(PS_SOLID,1,RGB(244,5,82)); HGDIOBJ po=SelectObject(dc,pn);
+            MoveToEx(dc,br.left,br.top,NULL); LineTo(dc,br.right,br.top); LineTo(dc,br.right,br.bottom); LineTo(dc,br.left,br.bottom); LineTo(dc,br.left,br.top);
+            SelectObject(dc,po); DeleteObject(pn);
+            ovText(dc,fH,20,16,"GTAMP debug HUD",RGB(244,5,82));
+            char ln[320];
+            snprintf(ln,sizeof(ln),"v%s · build %s · F9 HUD off",HOOK_VER,g_ver[0]?g_ver:"?");
+            ovText(dc,fS,20,44,ln,RGB(220,224,232));
+            if(shv::loaded()){
+                COLORREF c=g_shvReady?RGB(120,220,120):RGB(255,200,80);
+                snprintf(ln,sizeof(ln),"ScriptHookV: OK  script=%s  spawns=%d  remotePeds=%d",g_shvReady?"ready":"starting",g_shvSpawnCount,g_netPedCount);
+                ovText(dc,fS,20,64,ln,c);
+            } else ovText(dc,fS,20,64,"ScriptHookV.dll NOT FOUND",RGB(255,160,80));
+            if(g_shvReady&&g_f.found){
+                snprintf(ln,sizeof(ln),"pos: %.1f,%.1f,%.1f  h=%.1f  bridge: %s",g_shvLastPedCoords.x,g_shvLastPedCoords.y,g_shvLastPedCoords.z,g_shvLastHeading,g_sock!=INVALID_SOCKET?"connected":"waiting");
+                ovText(dc,fS,20,88,ln,RGB(180,255,180));
+                int yy=112;
+                for(int i2=0;i2<NET_PED_MAX && yy<232;i2++){
+                    if(!g_netPeds[i2].used) continue;
+                    snprintf(ln,sizeof(ln),"  %s  ped=%d  hp=%d", g_netPeds[i2].name[0]?g_netPeds[i2].name:g_netPeds[i2].id, g_netPeds[i2].ped, g_netPeds[i2].health);
+                    ovText(dc,fS,20,yy,ln,RGB(200,220,255)); yy+=15;
+                }
+                if(yy<120) ovText(dc,fS,20,108,"(no remote players yet)",RGB(150,150,155));
+            } else {
+                ovText(dc,fS,20,88,g_shvReady?"waiting for world…":"waiting for GTA to load…",RGB(255,200,120));
+            }
+        }
+        DeleteObject(fT); DeleteObject(fH); DeleteObject(fN); DeleteObject(fS);
+        EndPaint(w,&ps);
+        return 0;
+    }
+    if(m==WM_DESTROY){g_ov=NULL;return 0;}
+    return DefWindowProcA(w,m,a,b);
 }
 static DWORD WINAPI overlayThread(LPVOID){logf("overlay start");HINSTANCE hi=(HINSTANCE)GetModuleHandleA(NULL);WNDCLASSEXA wc={0};wc.cbSize=sizeof(wc);wc.lpfnWndProc=wndProc;wc.hInstance=hi;wc.hbrBackground=CreateSolidBrush(OVERLAY_KEY);wc.lpszClassName=OV_CLASS;RegisterClassExA(&wc);for(int i=0;i<200&&g_running;i++){g_gta=findGtaWnd();if(g_gta)break;Sleep(100);}if(g_gta){char t[96]={0};GetWindowTextA(g_gta,t,96);logf("GTA hwnd=%p '%s'",(void*)g_gta,t);}g_ov=CreateWindowExA(WS_EX_TOPMOST|WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,OV_CLASS,"GTAMP",WS_POPUP|WS_VISIBLE,0,0,720,240,NULL,NULL,hi,NULL);if(g_ov){SetLayeredWindowAttributes(g_ov,OVERLAY_KEY,255,LWA_COLORKEY|LWA_ALPHA);logf("overlay %p",(void*)g_ov);}strcpy_s(g_f.err,"Waiting for SHV ready...");MSG m;DWORD la=timeGetTime();
-    while(g_running){while(PeekMessageA(&m,NULL,0,0,PM_REMOVE)){TranslateMessage(&m);DispatchMessageA(&m);}if(!g_gta||!IsWindow(g_gta))g_gta=findGtaWnd();if(g_gta&&IsWindow(g_gta)&&g_ov){RECT g;if(IsWindowVisible(g_gta)&&GetWindowRect(g_gta,&g)){SetWindowPos(g_ov,HWND_TOPMOST,g.left+16,g.top+16,720,240,SWP_NOACTIVATE|SWP_SHOWWINDOW|SWP_NOOWNERZORDER);ShowWindow(g_ov,g_vis?SW_SHOWNOACTIVATE:SW_HIDE);InvalidateRect(g_ov,NULL,FALSE);}}if(GetAsyncKeyState(VK_F9)&1){g_vis=!g_vis;logf("overlay %s",g_vis?"on":"off");Sleep(250);}if(GetAsyncKeyState(VK_F10)&1){if(g_shvReady){logf("rescan (F10)");g_f.found=false;la=timeGetTime()-2000;doScan();}Sleep(250);}if(GetAsyncKeyState(VK_F11)&1){if(shv::loaded()){logf("F11 pressed - queuing local cop spawn (shvReady=%d)",(int)g_shvReady);SpawnReq r={0};strcpy_s(r.src,"F11");strcpy_s(r.model,"s_m_y_cop_01");r.useOffset=true;r.pedType=6;queueSpawn(&r);if(!g_shvReady)snprintf(g_shvMsg,sizeof(g_shvMsg),"F11 queued - will spawn once loaded");}else{logf("F11 pressed but SHV not loaded");snprintf(g_shvMsg,sizeof(g_shvMsg),"Waiting for ScriptHookV...");}Sleep(500);}DWORD now=timeGetTime();if(g_shvReady&&!g_f.found&&now-la>1500){la=now;doScan();}Sleep(25);}if(g_ov)DestroyWindow(g_ov);UnregisterClassA(OV_CLASS,hi);return 0;
+    while(g_running){while(PeekMessageA(&m,NULL,0,0,PM_REMOVE)){TranslateMessage(&m);DispatchMessageA(&m);}if(!g_gta||!IsWindow(g_gta))g_gta=findGtaWnd();if(g_gta&&IsWindow(g_gta)&&g_ov){RECT g;if(IsWindowVisible(g_gta)&&GetWindowRect(g_gta,&g)){bool full=g_consoleOpen||g_joinActive;
+if(full)SetWindowPos(g_ov,HWND_TOPMOST,g.left,g.top,g.right-g.left,g.bottom-g.top,SWP_NOACTIVATE|SWP_SHOWWINDOW|SWP_NOOWNERZORDER);
+else SetWindowPos(g_ov,HWND_TOPMOST,g.left+16,g.top+16,720,240,SWP_NOACTIVATE|SWP_SHOWWINDOW|SWP_NOOWNERZORDER);
+ShowWindow(g_ov,(full||g_vis)?SW_SHOWNOACTIVATE:SW_HIDE);InvalidateRect(g_ov,NULL,FALSE);}}if(GetAsyncKeyState(VK_F9)&1){g_vis=!g_vis;logf("overlay %s",g_vis?"on":"off");Sleep(250);}if(GetAsyncKeyState(VK_F10)&1){if(g_shvReady){logf("rescan (F10)");g_f.found=false;la=timeGetTime()-2000;doScan();}Sleep(250);}if(GetAsyncKeyState(VK_F11)&1){if(shv::loaded()){logf("F11 pressed - queuing local cop spawn (shvReady=%d)",(int)g_shvReady);SpawnReq r={0};strcpy_s(r.src,"F11");strcpy_s(r.model,"s_m_y_cop_01");r.useOffset=true;r.pedType=6;queueSpawn(&r);if(!g_shvReady)snprintf(g_shvMsg,sizeof(g_shvMsg),"F11 queued - will spawn once loaded");}else{logf("F11 pressed but SHV not loaded");snprintf(g_shvMsg,sizeof(g_shvMsg),"Waiting for ScriptHookV...");}Sleep(500);}{ // v1.8.0 — F8 console: works even before ScriptHookV is ready (like FiveM)
+  static bool f8w=false,escw=false,retw=false,bkw=false;
+  bool f8=(GetAsyncKeyState(VK_F8)&0x8000)!=0;
+  if(f8&&!f8w){
+    g_consoleOpen=!g_consoleOpen;
+    if(g_consoleOpen){ g_conInput[0]=0; g_conInputLen=0;
+      if(g_conLogN<2){ pushConLine("GTAMP console — type 'help'",255,220,120); pushConLine("connect <ip:port> · disconnect · quit · version",170,190,220); } }
+    logf("console %s",g_consoleOpen?"open":"closed");
+  }
+  f8w=f8;
+  if(g_consoleOpen){
+    bool esc=(GetAsyncKeyState(VK_ESCAPE)&0x8000)!=0; if(esc&&!escw){g_consoleOpen=false;logf("console closed (esc)");} escw=esc;
+    bool ret=(GetAsyncKeyState(VK_RETURN)&0x8000)!=0; if(ret&&!retw){ if(g_conInputLen>0)runConsoleCommand(g_conInput); g_conInput[0]=0;g_conInputLen=0; } retw=ret;
+    bool bk=(GetAsyncKeyState(VK_BACK)&0x8000)!=0; if(bk&&!bkw&&g_conInputLen>0)g_conInput[--g_conInputLen]=0; bkw=bk;
+    static SHORT cprev[256];
+    for(int vk=8; vk<256; vk++){
+      if(vk==VK_F8||vk==VK_ESCAPE||vk==VK_RETURN||vk==VK_BACK||vk==VK_SHIFT||vk==VK_CONTROL||vk==VK_MENU||vk==VK_LWIN||vk==VK_RWIN) continue;
+      SHORT st2=GetAsyncKeyState(vk);
+      bool dn=(st2&0x8000)!=0, ws=(cprev[vk]&0x8000)!=0;
+      cprev[vk]=st2;
+      if(!(dn&&!ws)) continue;
+      BYTE kb2[256]; GetKeyboardState(kb2);
+      WCHAR wc2[4]={0};
+      int n=ToUnicode((UINT)vk,MapVirtualKeyA((UINT)vk,MAPVK_VK_TO_VSC),kb2,wc2,4,0);
+      if(n<=0) continue;
+      for(int ci=0;ci<n;ci++){ wchar_t wch=wc2[ci]; if(wch<32||wch>126) continue;
+        if(g_conInputLen>=(int)sizeof(g_conInput)-1) break;
+        g_conInput[g_conInputLen++]=(char)wch; g_conInput[g_conInputLen]=0;
+      }
+    }
+  }
+}DWORD now=timeGetTime();if(g_shvReady&&!g_f.found&&now-la>1500){la=now;doScan();}Sleep(25);}if(g_ov)DestroyWindow(g_ov);UnregisterClassA(OV_CLASS,hi);return 0;
 }
 static void connectBridge(){
     g_sock=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
@@ -771,6 +941,37 @@ static void connectBridge(){
 // Net-thread: parse packet and update NetPed bookkeeping ONLY.
 // Any native call (spawn/delete/move) is queued for the SHV fiber.
 static void handleNetLine(const char*l){int ln=(int)strlen(l);if(ln<5)return;
+    // v1.8.0: FiveM-style join progress pushed from the launcher (in-game connect panel)
+    if(strstr(l,"\"joinBegin\"")){
+        int nl=0; const char* nv=jss(l,"server",&nl); if(nv&&nl>0){ memcpy(g_joinServer,nv,nl<63?nl:63); g_joinServer[nl<63?nl:63]=0; }
+        g_joinActive=true; g_joinFailed=false; g_joinT0=timeGetTime();
+        sstrcpy(g_joinStage,"Initializing multiplayer session",sizeof(g_joinStage));
+        { char jl[160]; snprintf(jl,sizeof(jl),"connecting to %s", g_joinServer[0]?g_joinServer:"server"); pushConLine(jl,140,200,255); }
+        return;
+    }
+    if(strstr(l,"\"joinStage\"")){
+        if(!g_joinT0){ g_joinT0=timeGetTime(); }
+        g_joinActive=true; // covers panels whose joinBegin raced the bridge link
+        int nl=0; const char* nv=jss(l,"stage",&nl); if(nv&&nl>0){ memcpy(g_joinStage,nv,nl<95?nl:95); g_joinStage[nl<95?nl:95]=0; }
+        if(g_joinStage[0]) pushConLine(g_joinStage,170,190,220);
+        return;
+    }
+    if(strstr(l,"\"joinFail\"")){
+        int nl=0; const char* nv=jss(l,"msg",&nl); if(nv&&nl>0){ memcpy(g_joinStage,nv,nl<95?nl:95); g_joinStage[nl<95?nl:95]=0; }
+        g_joinFailed=true; g_joinActive=true;
+        { char jl[180]; snprintf(jl,sizeof(jl),"FAILED: %s", g_joinStage); pushConLine(jl,255,120,120); }
+        return;
+    }
+    if(strstr(l,"\"joinEnd\"")){
+        if(g_joinActive && !g_joinFailed){ pushConLine("entered session — have fun!",120,220,140); }
+        g_joinActive=false;
+        return;
+    }
+    if(strstr(l,"\"conLog\"")){
+        int nl=0; const char* nv=jss(l,"msg",&nl); char m2[180]={0}; if(nv&&nl>0){ memcpy(m2,nv,nl<179?nl:179); m2[nl<179?nl:179]=0; }
+        if(m2[0]) pushConLine(m2,200,200,200);
+        return;
+    }
     // Phase 7: incoming chat display
     if(strstr(l,"\"chat\"") && (strstr(l,"\"t\":\"chat\"")||strstr(l,"\"t\": \"chat\""))){
         int nl=0; const char* nv=jss(l,"name",&nl); char name[32]="SERVER";
@@ -877,5 +1078,5 @@ static DWORD WINAPI netThread(LPVOID){logf("net start");WSADATA w;WSAStartup(MAK
 static VOID WINAPI delayedShvLoad(PVOID){
     {HMODULE pe[2048];DWORD need=0;if(EnumProcessModules(GetCurrentProcess(),(HMODULE*)pe,sizeof(pe),&need)){DWORD n=need/sizeof(HMODULE);for(DWORD i=0;i<n&&i<512;i++){char nme[MAX_PATH]={0};if(GetModuleFileNameA(pe[i],nme,MAX_PATH)){const char*b=strrchr(nme,'\\');b=b?b+1:nme;if(strstr(b,"ScriptHook")||!_stricmp(b,"dinput8.dll")||!_stricmp(b,"ScriptHookV.dll"))logf("  module[%u]: %s @ %p",i,nme,(void*)pe[i]);}}}}for(int i=0;i<120&&g_running;i++){if(shv::load()){logf("ScriptHookV exports resolved OK");shv::registerScript(shvScriptMain);logf("scriptRegister called (fn=%p)",(void*)shvScriptMain);return;}if(i==0)logf("SHV not found initially (err=%u). Will retry.",(unsigned)GetLastError());Sleep(500);}logf("ScriptHookV not loadable after 60s.");
 }
-BOOL APIENTRY DllMain(HMODULE m,DWORD r,LPVOID){if(r==DLL_PROCESS_ATTACH){DisableThreadLibraryCalls(m);InitializeCriticalSection(&g_qCs);InitializeCriticalSection(&g_npCs);InitializeCriticalSection(&g_sendCs);g_pid=GetCurrentProcessId();char t[MAX_PATH];GetTempPathA(MAX_PATH,t);strcat_s(t,MAX_PATH,"gtamp_hook.log");fclose(fopen(t,"w"));logf("==== GTAMP hook v%s PID=%u ====",HOOK_VER,(unsigned)g_pid);HMODULE hm=GetModuleHandleA("GTA5.exe");if(!hm){logf("ERROR: GTA5.exe not found");return TRUE;}detectBuild(hm);shv::setLogger([](const char*s){logf("%s",s);});shv::setSelfHinst(m);CloseHandle(CreateThread(NULL,0,(LPTHREAD_START_ROUTINE)delayedShvLoad,NULL,0,NULL));g_ovT=CreateThread(NULL,0,overlayThread,NULL,0,NULL);g_netT=CreateThread(NULL,0,netThread,NULL,0,NULL);}else if(r==DLL_PROCESS_DETACH){g_running=false;if(g_ovT){WaitForSingleObject(g_ovT,3000);CloseHandle(g_ovT);}if(g_netT){WaitForSingleObject(g_netT,3000);CloseHandle(g_netT);}DeleteCriticalSection(&g_qCs);DeleteCriticalSection(&g_npCs);DeleteCriticalSection(&g_sendCs);logf("unloaded");}return TRUE;}
+BOOL APIENTRY DllMain(HMODULE m,DWORD r,LPVOID){if(r==DLL_PROCESS_ATTACH){DisableThreadLibraryCalls(m);InitializeCriticalSection(&g_qCs);InitializeCriticalSection(&g_npCs);InitializeCriticalSection(&g_sendCs);InitializeCriticalSection(&g_conCs);g_pid=GetCurrentProcessId();char t[MAX_PATH];GetTempPathA(MAX_PATH,t);strcat_s(t,MAX_PATH,"gtamp_hook.log");fclose(fopen(t,"w"));logf("==== GTAMP hook v%s PID=%u ====",HOOK_VER,(unsigned)g_pid);HMODULE hm=GetModuleHandleA("GTA5.exe");if(!hm){logf("ERROR: GTA5.exe not found");return TRUE;}detectBuild(hm);shv::setLogger([](const char*s){logf("%s",s);});shv::setSelfHinst(m);CloseHandle(CreateThread(NULL,0,(LPTHREAD_START_ROUTINE)delayedShvLoad,NULL,0,NULL));g_ovT=CreateThread(NULL,0,overlayThread,NULL,0,NULL);g_netT=CreateThread(NULL,0,netThread,NULL,0,NULL);}else if(r==DLL_PROCESS_DETACH){g_running=false;if(g_ovT){WaitForSingleObject(g_ovT,3000);CloseHandle(g_ovT);}if(g_netT){WaitForSingleObject(g_netT,3000);CloseHandle(g_netT);}DeleteCriticalSection(&g_qCs);DeleteCriticalSection(&g_npCs);DeleteCriticalSection(&g_sendCs);DeleteCriticalSection(&g_conCs);logf("unloaded");}return TRUE;}
 extern "C" __declspec(dllexport) const char* gtamp_version(){return "GTAMP Hook v" HOOK_VER;}
