@@ -89,15 +89,18 @@ app.get('/api/servers/live', (req, res) => {
   res.json({ servers: live });
 });
 
-// Launcher "active" ping -> used for the download-page active count
+// Launcher "active" ping -> live count of launchers seen in the last 90s.
+// In-memory on purpose: this is transient presence data, not state to persist.
+const liveLaunchers = new Map(); // id -> lastSeen
 app.post('/api/launcher/ping', (req, res) => {
-  const set = settings();
-  set.activeLauncherCount = Number(set.activeLauncherCount || 0) + 1;
-  store.save('settings', set);
+  const id = String((req.body && req.body.id) || req.ip || 'anon');
+  liveLaunchers.set(id, Date.now());
   res.json({ ok: true });
 });
 app.get('/api/launcher/active', (req, res) => {
-  res.json({ active: settings().activeLauncherCount || 0 });
+  const cutoff = Date.now() - 90 * 1000;
+  for (const [id, t] of liveLaunchers) if (t < cutoff) liveLaunchers.delete(id);
+  res.json({ active: liveLaunchers.size });
 });
 
 // ---------- Download ----------

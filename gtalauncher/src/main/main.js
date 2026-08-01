@@ -289,7 +289,68 @@ function ensureMpUdp(serverAddr) {
     // keepalive
     if (ensureMpUdp._ping) clearInterval(ensureMpUdp._ping);
     ensureMpUdp._ping = setInterval(() => mpSend({ t: 'ping', ts: Date.now() }), 2000);
+    // report session to the website for the live server list
+    try { startWebsiteReporter(); } catch (e) { writeLaunchDiag(['website reporter: ' + e.message]); }
   });
+}
+
+// ---------- Website live sync ----------
+// Reports this session (server + player count) to the GTAMP website so the
+// web server list / homepage badge match what the launcher shows.
+function postJson(urlStr, obj, timeoutMs = 4000) {
+  return new Promise((resolve) => {
+    try {
+      const u = new URL(urlStr);
+      const lib = u.protocol === 'https:' ? require('https') : require('http');
+      const data = Buffer.from(JSON.stringify(obj));
+      const req = lib.request({
+        hostname: u.hostname,
+        port: u.port || (u.protocol === 'https:' ? 443 : 80),
+        path: u.pathname + u.search,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': data.length },
+        timeout: timeoutMs
+      }, (res) => { res.resume(); resolve(true); });
+      req.on('timeout', () => { try { req.destroy(); } catch {} resolve(false); });
+      req.on('error', () => resolve(false));
+      req.write(data);
+      req.end();
+    } catch { resolve(false); }
+  });
+}
+
+let websiteReporter = null;
+let launcherPingTimer = null;
+
+function startWebsiteReporter() {
+  const site = String((config && config.websiteUrl) || defaultConfig.websiteUrl || '').replace(/\/+$/, '');
+  if (!site) return;
+  stopWebsiteReporter();
+  if (!config.clientId) {
+    try { config.clientId = require('crypto').randomUUID(); saveConfig(config); } catch {}
+  }
+  const report = () => {
+    postJson(site + '/api/servers/report', {
+      addr: mpServer.host + ':' + mpServer.port,
+      name: config.serverName || 'GTAMP Server',
+      desc: '',
+      mode: 'Freeroam',
+      players: mpRemote.size + (mpSpawned ? 1 : 0),
+      maxPlayers: 64,
+      tags: ['freeroam']
+    });
+  };
+  report();
+  websiteReporter = setInterval(report, 10000);
+  const ping = () => postJson(site + '/api/launcher/ping', { id: config.clientId });
+  ping();
+  launcherPingTimer = setInterval(ping, 30000);
+  writeLaunchDiag(['website reporter started -> ' + site]);
+}
+
+function stopWebsiteReporter() {
+  if (websiteReporter) { clearInterval(websiteReporter); websiteReporter = null; }
+  if (launcherPingTimer) { clearInterval(launcherPingTimer); launcherPingTimer = null; }
 }
 
 function ensureHookTcpServer() {
@@ -427,6 +488,9 @@ const defaultConfig = {
   history: [],
   launcherType: 'auto',
   masterServerUrl: 'http://127.0.0.1:22003',
+  websiteUrl: 'http://127.0.0.1:3000',
+  serverName: 'GTAMP Server',
+  clientId: '',
   nuiScale: 1.0,
   streamerMode: false,
   devTools: false,
@@ -735,6 +799,7 @@ app.on('before-quit', cleanup);
 Menu.setApplicationMenu(null);
 
 function cleanup() {
+  try { stopWebsiteReporter(); } catch {}
   try { if (bridgeProc && !bridgeProc.killed) bridgeProc.kill(); } catch {}
   try { discordRpc.stop(); } catch {}
 }
