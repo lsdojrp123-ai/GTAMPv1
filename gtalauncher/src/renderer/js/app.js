@@ -170,6 +170,11 @@ async function init() {
     toast(r.ok?'Cop spawn queued in-game':'Hook not connected — launch GTA first', r.ok?'ok':'err');
   });
   window.gtamp.on('hook:status', s => { setHookPill(s.connected?'ok':'off'); showSpawnPanel(true); });
+  window.gtamp.on('game:closed', () => {
+    toast('GTA V closed — welcome back to GTAMP','ok');
+    logConsole('Game session ended. GTAMP is still running in the background.','info');
+    setHookPill('off');
+  });
   window.gtamp.on('hook:event', pkt => {
     if (!pkt) return;
     if (pkt.t === 'hookHello') { setHookPill('ok'); logConsole('[hook] connected v='+pkt.v+' gta='+pkt.gta,'ok'); showSpawnPanel(true); }
@@ -622,42 +627,12 @@ async function connectTo(s) {
   const stage = document.getElementById('conn-stage');
   const sub   = document.getElementById('con-sub');
   const resEl = document.getElementById('conn-resources');
-  const STAGES = [
-    'Starting GTAMP','Loading settings & cache','Contacting platform services',
-    'Retrieving server information','Initializing network','Handshaking with FXServer',
-    'Discovering resources','Downloading chat','Downloading freeroam',
-    'Downloading spawnmanager','Downloading voice','Loading client scripts & NUI',
-    'Requesting spawn, launching GTA V (GTAMP session)','Injecting GTAMP hook',
-    'Finalizing connection'
-  ];
-  const RESOURCES = ['chat','freeroam','spawnmanager','voice','chat NUI'];
-  if (resEl) resEl.innerHTML = RESOURCES.map(r=>`
-    <div class="conn-res-row" data-r="${esc(r)}">
-      <div class="conn-res-name">${esc(r)}</div>
-      <div class="conn-res-bar"><div class="conn-res-fill"></div></div>
-      <div class="conn-res-pct">0%</div>
-    </div>`).join('');
-  for (let i=0;i<STAGES.length;i++) {
-    if (stage) stage.textContent = STAGES[i];
-    if (sub) sub.textContent = `Stage ${i+1} of ${STAGES.length}`;
-    // Injecting hook stage waits longer (real 10s delay happens in main, we show progress)
-    const stageDelay = (STAGES[i].includes('Injecting')) ? 1200 : (250 + Math.random()*350);
-    await new Promise(r => setTimeout(r, stageDelay));
-    if (i>=7 && i<=11) {
-      const ri = i-7;
-      const row = resEl?.querySelector(`[data-r="${RESOURCES[ri]}"]`);
-      if (row) {
-        for (let p=0;p<=100;p+=8) {
-          const f = row.querySelector('.conn-res-fill'), pl = row.querySelector('.conn-res-pct');
-          if (f) f.style.width=p+'%'; if (pl) pl.textContent=p+'%';
-          await new Promise(r=>setTimeout(r,20));
-        }
-      }
-    }
-  }
-  if (stage) stage.textContent = 'Connected to GTAMP — launching GTA V...';
-  await new Promise(r=>setTimeout(r,800));
-  // Actually launch via main
+  // v1.7.0 — real event-driven loading happens in the GTAMP connect window
+  // (main process). Here we just kick off the connect and report hard failures.
+  if (stage) stage.textContent = 'Opening GTAMP connect window…';
+  if (sub) sub.textContent = (s && (s.name || s.addr)) || '';
+  if (resEl) resEl.innerHTML = '';
+  // Launch via main — the connect window takes over from here
   try {
     const res = await window.gtamp.game.launch({
       serverAddr: s.addr,
@@ -672,6 +647,7 @@ async function connectTo(s) {
     }
     if (res.note) toast(res.note, 'warn');
     if (res.launched) logConsole('Launch method: '+res.launched+' (FiveM-style platform boot)','info');
+    if (res.connecting) toast('Connecting… follow the GTAMP loading window on your screen.','ok');
 
     toast('GTAMP session started. GTA launches offline from Rockstar Online (our multiplayer). Hook loads in ~15–30s.','ok');
     logConsole(`GTAMP multiplayer -> ${s.addr} (Rockstar Online disabled; GTAMP hook injects in ~15-30s)`,'ok');

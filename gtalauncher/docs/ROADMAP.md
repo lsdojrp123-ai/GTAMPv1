@@ -6,7 +6,19 @@
 
 ---
 
-# 📍 WHERE WE ARE — v1.6.0 (verified against the code)
+# 📍 WHERE WE ARE — v1.7.0 (verified against the code)
+
+## v1.7.0 — FiveM-style loading UX (this release)
+
+| Feature | Status | Evidence |
+|---------|--------|----------|
+| Startup splash screen (FiveM-style "Starting GTAMP…" window) — appears instantly, drives a 7-step startup checklist | ✅ Done | `src/renderer/loading.html` (mode=startup), `src/main/main.js runStartup()` |
+| GTA V ownership verification — exe + `update\update.rpf` (≥200 MB) + platform DRM signature (Steam/Epic/Rockstar) checked *before* the launcher opens; failure keeps you in the splash with Choose-folder/Retry/Quit | ✅ Done | `main.js verifyGtaOwnership()` + startup step 3–4 |
+| "CONNECTING TO ROCKSTAR GAMES SERVICES" stage (platform hand-off messaging like the FiveM splash) | ✅ Done | startup step 5 |
+| Server-join loading window — real event-driven steps: ownership → platform → launch GTA → wait GTA5.exe → inject → hook hello → server welcome → spawn; countdowns, retry, retry-inject, cancel | ✅ Done | `main.js runConnectFlow()` + `loading.html` (mode=connect) |
+| GTAMP runs in the background while GTA plays — launcher hides to tray, restores itself when GTA5.exe exits | ✅ Done | `ensureTray()` + `startGtaExitWatch()` + `game:closed` renderer event |
+| F8 console available *during* server loading (hook thread is independent) + **T opens chat** (like FiveM) | ✅ Done | `dllmain.cpp` T-key edge-trigger, `HOOK_VER "1.7.0"` |
+| Tray icon + window icon (previously missing `build/icon.png`) | ✅ Done | `build/icon.png` (generated original GTAMP hexagon) |
 
 | Phase | Feature | Status | Evidence |
 |-------|---------|--------|----------|

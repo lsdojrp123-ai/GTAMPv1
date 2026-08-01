@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>GTAMP</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@500&family=Rubik:wght@300;400&display=swap" rel="stylesheet">
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-user-select:none;user-select:none}
+  html,body{height:100%;overflow:hidden}
+  body{background:#0a0b0a;color:ivory;font-family:"Rubik",sans-serif;font-weight:300;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cpath d='M-30 30 L30 -30 M-30 90 L90 -30 M-30 150 L150 -30 M30 150 L150 30 M90 150 L150 90' stroke='%23fffff0' stroke-opacity='.022' stroke-width='1'/%3E%3C/svg%3E")}
+  #wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;padding:26px;position:relative}
+  #logo{width:86px;height:86px;filter:drop-shadow(0 0 20px rgba(244,5,82,.5));animation:pulse 2.4s ease-in-out infinite}
+  @keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.05)}}
+  #brand{position:absolute;top:14px;left:16px;display:flex;align-items:center;gap:7px;color:#565b66;font-size:10px;letter-spacing:2px;text-transform:uppercase}
+  #brand svg{width:14px;height:14px}
+  #status{margin-top:20px;font-size:12px;letter-spacing:2.6px;text-transform:uppercase;color:ivory;text-align:center;min-height:16px;max-width:340px;line-height:1.5}
+  #sub{margin-top:6px;font-size:11px;color:#8a8f9c;text-align:center;min-height:14px;max-width:340px;line-height:1.5}
+  #steps{margin-top:16px;width:100%;max-width:296px;min-height:148px}
+  .step{display:flex;align-items:center;gap:9px;font-size:11.5px;color:#5d626e;padding:3.5px 0;transition:color .25s}
+  .step.active{color:ivory}
+  .step.done{color:#9aa0ad}
+  .step.failed{color:#ff4f7e}
+  .step .ic{width:15px;text-align:center;font-size:11px;flex-shrink:0}
+  .step.done .ic{color:#3ddc84}
+  .step.failed .ic{color:#ff4f7e}
+  .spin{display:inline-block;animation:ro 1s linear infinite;color:#f40552}
+  @keyframes ro{to{transform:rotate(360deg)}}
+  #bar{margin-top:14px;width:230px;height:2px;background:rgba(255,255,255,.08);border-radius:2px;position:relative;overflow:hidden}
+  #bar i{position:absolute;top:0;left:-45%;width:45%;height:100%;background:#f40552;border-radius:2px;animation:shim 1.4s ease-in-out infinite}
+  @keyframes shim{to{left:115%}}
+  #bar.det{overflow:hidden}
+  #bar.det i{animation:none;left:0;width:0;transition:width .35s ease}
+  #foot{position:absolute;bottom:11px;font-size:10px;color:#4a4f5a;letter-spacing:1px}
+  #error{display:none;flex-direction:column;align-items:center;gap:10px;padding:0 10px;text-align:center;max-width:360px}
+  #error h2{color:#ff4f7e;font-family:"Montserrat",sans-serif;font-size:15px;font-weight:500}
+  #error p{color:#9aa0ad;font-size:11.5px;line-height:1.65;white-space:pre-wrap}
+  .btns{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;justify-content:center}
+  button{cursor:pointer;font-family:"Rubik",sans-serif;font-weight:400;font-size:10.5px;letter-spacing:1px;text-transform:uppercase;
+    padding:8px 14px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.22);color:ivory;border-radius:2px}
+  button:hover{background:#f40552;border-color:#f40552;box-shadow:0 0 10px rgba(244,5,82,.4)}
+  #cancel{position:absolute;right:12px;bottom:8px;background:none;border:none;color:#565b66;font-size:10px;letter-spacing:1px;text-transform:uppercase;padding:6px;display:none}
+  #cancel:hover{color:#f40552;background:none;border:none;box-shadow:none}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="brand"><svg viewBox="0 0 32 32"><path d="M16 1 L29 8.5 V23.5 L16 31 L3 23.5 V8.5 Z" fill="#565b66"/></svg>GTAMP</div>
+  <svg id="logo" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 1 L29 8.5 V23.5 L16 31 L3 23.5 V8.5 Z" fill="#f40552"/><path d="M11 21.5 V10.5 h7.2 c2.6 0 4.3 1.5 4.3 3.9 0 1.6-.8 2.8-2.1 3.4 L23 21.5 h-3.4 l-2.2-3.4 H14 v3.4 Z M14 13.2 v2.2 h4 c1 0 1.6-.5 1.6-1.1 s-.6-1.1-1.6-1.1 Z" fill="#fff"/></svg>
+  <div id="status">STARTING GTAMP</div>
+  <div id="sub"></div>
+  <div id="steps"></div>
+  <div id="bar"><i></i></div>
+  <div id="error"></div>
+  <div id="foot">GTAMP Loading…</div>
+  <button id="cancel">✕ &nbsp;Cancel</button>
+</div>
+<script>
+(function(){
+  var q = new URLSearchParams(location.search);
+  var MODE = q.get('mode') || 'startup';
+  var SERVER = q.get('server') || '';
+  var VER = q.get('v') || '';
+  var statusEl = document.getElementById('status');
+  var subEl = document.getElementById('sub');
+  var stepsEl = document.getElementById('steps');
+  var barEl = document.getElementById('bar');
+  var errEl = document.getElementById('error');
+  var cancelBtn = document.getElementById('cancel');
+  document.getElementById('foot').textContent = 'GTAMP v' + VER;
+
+  if (MODE === 'connect') {
+    cancelBtn.style.display = 'block';
+    statusEl.textContent = 'CONNECTING TO ' + (SERVER || 'SERVER').toUpperCase();
+  }
+  cancelBtn.addEventListener('click', function(){ window.gtamp.loading.action('cancel'); });
+
+  function renderSteps(list){
+    stepsEl.innerHTML = '';
+    (list || []).forEach(function(s){
+      var row = document.createElement('div');
+      row.className = 'step ' + (s.state || 'pending');
+      var ic = document.createElement('span');
+      ic.className = 'ic';
+      if (s.state === 'done') ic.textContent = '✓';
+      else if (s.state === 'failed') ic.textContent = '✗';
+      else if (s.state === 'active') { ic.innerHTML = '<span class="spin">◌</span>'; }
+      else ic.textContent = '•';
+      var lb = document.createElement('span');
+      lb.textContent = s.label;
+      row.appendChild(ic); row.appendChild(lb);
+      stepsEl.appendChild(row);
+    });
+  }
+
+  if (window.gtamp && window.gtamp.loading) {
+    window.gtamp.loading.onSteps(renderSteps);
+    window.gtamp.loading.onStatus(function(d){
+      if (d.status !== undefined && d.status !== '') statusEl.textContent = d.status;
+      if (d.sub !== undefined) subEl.textContent = d.sub;
+      if (typeof d.pct === 'number') {
+        barEl.classList.add('det');
+        barEl.querySelector('i').style.width = Math.round(d.pct * 100) + '%';
+      }
+    });
+    window.gtamp.loading.onError(function(e){
+      stepsEl.style.display = 'none';
+      barEl.style.display = 'none';
+      errEl.style.display = 'flex';
+      errEl.innerHTML = '';
+      var h = document.createElement('h2'); h.textContent = e.title || 'Something went wrong';
+      var p = document.createElement('p'); p.textContent = e.detail || '';
+      var bw = document.createElement('div'); bw.className = 'btns';
+      (e.actions || [{ id: 'cancel', label: 'Close' }]).forEach(function(a){
+        var b = document.createElement('button');
+        b.textContent = a.label;
+        b.addEventListener('click', function(){ window.gtamp.loading.action(a.id); });
+        bw.appendChild(b);
+      });
+      errEl.appendChild(h); errEl.appendChild(p); errEl.appendChild(bw);
+      statusEl.textContent = MODE === 'connect' ? 'CONNECTION PROBLEM' : 'GTAMP NEEDS ATTENTION';
+      subEl.textContent = '';
+    });
+  }
+})();
+</script>
+</body>
+</html>

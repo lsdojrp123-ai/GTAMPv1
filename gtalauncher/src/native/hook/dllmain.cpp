@@ -17,7 +17,7 @@
 #pragma comment(lib,"version.lib")
 #pragma comment(lib,"winmm.lib")
 
-#define HOOK_VER "1.6.0"
+#define HOOK_VER "1.7.0"
 #define OVERLAY_KEY RGB(255,0,255)
 #define OV_CLASS "GTAMP_OV160"
 static volatile bool g_running=true;
@@ -494,7 +494,7 @@ static void drawChatUI(){
         char buf[CHAT_INPUT_MAX+8];
         snprintf(buf, sizeof(buf), "> %s_", g_chatInput);
         drawText2d(buf, 0.02f, 0.93f, 0.40f, 255, 255, 120, 255, false);
-        drawText2d("F8 chat | Enter send | Esc cancel", 0.02f, 0.96f, 0.28f, 180, 180, 180, 200, false);
+        drawText2d("T / F8 chat | Enter send | Esc cancel", 0.02f, 0.96f, 0.28f, 180, 180, 180, 200, false);
     }
 }
 
@@ -585,13 +585,19 @@ static void __cdecl shvScriptMain(){
         // Phase 6+7: nametags + chat HUD every frame (text natives are cheap)
         drawNametags();
         drawChatUI();
-        // F8 toggles chat input (edge-trigger via static debounce)
+        // F8 (console) or T (chat, like FiveM) opens chat input — edge-triggered.
+        // Works during server loading too: hook thread is independent of the game.
         {
-            static bool f8Was=false, escWas=false, retWas=false, bkWas=false;
+            static bool f8Was=false, tWas=false, escWas=false, retWas=false, bkWas=false;
             bool f8 = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
+            bool tk = (GetAsyncKeyState(0x54) & 0x8000) != 0; // 'T'
+            if(!g_chatOpen && tk && !tWas){
+                g_chatOpen = true; g_chatOpenAt=now; g_chatInput[0]=0; g_chatInputLen=0; logf("chat: opened (T)");
+            }
+            tWas=tk;
             if(f8 && !f8Was){
                 g_chatOpen = !g_chatOpen;
-                if(g_chatOpen){ g_chatOpenAt=now; g_chatInput[0]=0; g_chatInputLen=0; logf("chat: opened"); }
+                if(g_chatOpen){ g_chatOpenAt=now; g_chatInput[0]=0; g_chatInputLen=0; logf("chat: opened (F8)"); }
                 else { logf("chat: closed"); }
                 Sleep(0);
             }

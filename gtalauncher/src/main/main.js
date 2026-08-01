@@ -1,5 +1,5 @@
 // src/main/main.js - GTAMP Launcher main process
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, Tray, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
@@ -23,6 +23,14 @@ let bridgeProc = null;
 let gameProc = null;
 let injectorProc = null;
 let hostedServers = [];
+
+// v1.7.0: loading UI (startup splash + server connect window) + tray
+let loadingWin = null;
+let tray = null;
+let gtaWatchTimer = null;
+let connectCtl = null;
+let startupCtl = null;
+let startupDone = false;
 
 let hookClient = null;
 let hookConnected = false;
@@ -144,10 +152,12 @@ function handleServerPacket(pkt) {
       writeLaunchDiag(['MP WELCOME netId=' + mpNetId + ' server=' + (pkt.server && pkt.server.name)]);
       // Minimal client: ack resources immediately so server finalizes spawn
       mpSend({ t: 'resourceAck' });
+      if (connectCtl) connectCtl.event('welcome');
       break;
     }
     case 'spawn': {
       mpSpawned = true;
+      if (connectCtl) connectCtl.event('spawn');
       if (pkt.pos) {
         // Don't force local player coords — hook owns real pos. Just mark spawned.
       }
@@ -370,8 +380,10 @@ function ensureHookTcpServer() {
           let m; try { m = JSON.parse(l); } catch { continue; }
           if (m.t === 'hookHello') {
             writeLaunchDiag(['hookHello v=' + (m.v || '?') + ' gta=' + (m.gta || '?')]);
+            if (connectCtl) connectCtl.event('hookHello', m.v || '?');
           } else if (m.t === 'ready') {
             writeLaunchDiag(['hook SHV ready ped=' + m.ped]);
+            if (connectCtl) connectCtl.event('hookReady');
             // Resync all known remotes into the game now that natives work
             for (const p of mpRemote.values()) hookSpawnRemotePlayer(p);
             setTimeout(() => { if (!mpGotOtherPlayer) startSoloBot(); }, 2000);
@@ -747,6 +759,447 @@ async function detectGTAPath() {
   return '';
 }
 
+// ---------- GTA V ownership verification (v1.7.0) ----------
+// FiveM-style: GTAMP refuses to run without a genuine, fully-installed copy.
+function verifyGtaOwnership(dir) {
+  const checks = [];
+  const add = (label, ok, note) => checks.push({ label, ok: !!ok, note: note || '' });
+  if (!dir) {
+    add('Grand Theft Auto V install folder', false, 'No folder configured');
+    add('Game executable (GTA5.exe)', false, '');
+    add('Game data archive (update\\update.rpf)', false, '');
+    add('Store platform (Steam / Epic / Rockstar)', false, '');
+    return { ok: false, checks, edition: '', platform: '' };
+  }
+  const gtaExe = path.join(dir, 'GTA5.exe');
+  const enhExe = path.join(dir, 'GTA5_Enhanced.exe');
+  const playExe = path.join(dir, 'PlayGTAV.exe');
+  const hasGta = fs.existsSync(gtaExe) || fs.existsSync(playExe);
+  const hasEnhanced = fs.existsSync(enhExe);
+  const edition = hasEnhanced ? 'enhanced' : (hasGta ? 'legacy' : '');
+  add('Grand Theft Auto V install folder', fs.existsSync(dir), dir);
+  add('Game executable (GTA5.exe)', hasGta || hasEnhanced, hasEnhanced ? 'Enhanced edition' : (hasGta ? 'Legacy edition' : 'missing'));
+  // Game data archive (multi-hundred-MB) — strong "real copy" signal
+  let dataOk = false;
+  try {
+    const upd = path.join(dir, 'update', 'update.rpf');
+    if (fs.existsSync(upd)) dataOk = fs.statSync(upd).size > 200 * 1024 * 1024;
+  } catch {}
+  add('Game data archive (update\\update.rpf)', dataOk, dataOk ? 'fully installed' : 'not found / too small');
+  let platform = '';
+  if (fs.existsSync(path.join(dir, 'steam_api64.dll')) || fs.existsSync(path.join(dir, 'steam_api64r.dll'))) platform = 'steam';
+  else if (fs.existsSync(path.join(dir, 'EOSSDK-Win64-Shipping.dll'))) platform = 'epic';
+  else if (fs.existsSync(playExe) || fs.existsSync(path.join(dir, 'GTAVLauncher.exe')) || fs.existsSync(path.join(dir, 'socialclub.dll'))) platform = 'rockstar';
+  add('Store platform (Steam / Epic / Rockstar)', platform !== '', platform || 'unknown');
+  return { ok: checks.every(c => c.ok), checks, edition, platform, dir };
+}
+
+// ---------- Loading window: startup splash + server connect (v1.7.0) ----------
+const LAUNCHER_VER = '1.7.0';
+function openLoading(mode, opts = {}) {
+  closeLoading();
+  loadingWin = new BrowserWindow({
+    width: 420, height: 470, resizable: false, maximizable: false, minimizable: false,
+    frame: false, show: false, backgroundColor: '#0a0b0a',
+    alwaysOnTop: mode === 'connect',
+    title: mode === 'connect' ? 'GTAMP — Connecting' : 'GTAMP',
+    icon: path.join(__dirname, '..', '..', 'build', 'icon.png'),
+    webPreferences: {
+      preload: path.join(__dirname, '..', 'preload', 'preload.js'),
+      contextIsolation: true, nodeIntegration: false, sandbox: false
+    }
+  });
+  loadingWin.once('ready-to-show', () => { try { loadingWin.show(); loadingWin.focus(); } catch {} });
+  loadingWin.on('closed', () => { loadingWin = null; });
+  loadingWin.loadFile(path.join(__dirname, '..', 'renderer', 'loading.html'), {
+    query: { mode, server: opts.server || '', v: LAUNCHER_VER }
+  });
+}
+function closeLoading() {
+  try { if (loadingWin && !loadingWin.isDestroyed()) loadingWin.destroy(); } catch {}
+  loadingWin = null;
+}
+function sendLoading(ch, payload) {
+  try { if (loadingWin && !loadingWin.isDestroyed()) loadingWin.webContents.send('loading:' + ch, payload); } catch {}
+}
+const loadingSteps = (steps) => sendLoading('steps', steps);
+const loadingStatus = (status, sub, pct) => sendLoading('status', { status, sub: sub || '', pct: (typeof pct === 'number' ? pct : null) });
+
+// ---------- Tray (GTAMP keeps running in the background like FiveM) ----------
+function ensureTray() {
+  if (tray) return tray;
+  try {
+    const iconPath = path.join(__dirname, '..', '..', 'build', 'icon.png');
+    let img = nativeImage.createFromPath(iconPath);
+    if (!img.isEmpty()) img = img.resize({ width: 16, height: 16 });
+    tray = new Tray(img.isEmpty() ? nativeImage.createEmpty() : img);
+    tray.setToolTip('GTAMP');
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: 'Show GTAMP', click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } } },
+      { type: 'separator' },
+      { label: 'Quit GTAMP', click: () => app.quit() }
+    ]));
+    tray.on('click', () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } });
+  } catch (e) { writeLaunchDiag(['tray: ' + e.message]); }
+  return tray;
+}
+
+// ---------- GTA5.exe presence + exit watcher ----------
+function gtaRunning() {
+  if (process.platform !== 'win32') return false;
+  try {
+    const out = require('child_process').execSync(
+      'tasklist /FI "IMAGENAME eq GTA5.exe" /NH & tasklist /FI "IMAGENAME eq GTA5_Enhanced.exe" /NH',
+      { windowsHide: true, encoding: 'utf8', timeout: 6000 }) || '';
+    return /GTA5(.exe)?\s|GTA5_Enhanced\.exe/i.test(out);
+  } catch { return false; }
+}
+function startGtaExitWatch() {
+  stopGtaExitWatch();
+  let misses = 0;
+  gtaWatchTimer = setInterval(() => {
+    if (gtaRunning()) misses = 0; else misses++;
+    if (misses >= 3) { stopGtaExitWatch(); onGtaClosed(); }
+  }, 3000);
+}
+function stopGtaExitWatch() { if (gtaWatchTimer) { clearInterval(gtaWatchTimer); gtaWatchTimer = null; } }
+function onGtaClosed() {
+  writeLaunchDiag(['GTA5 exited — restoring GTAMP launcher']);
+  try { if (injectorProc && !injectorProc.killed) injectorProc.kill(); } catch {}
+  try { discordRpc.setInLauncher(); } catch {}
+  try { tray && tray.setToolTip('GTAMP'); } catch {}
+  if (mainWindow) { mainWindow.show(); mainWindow.focus(); mainWindow.webContents.send('game:closed', {}); }
+}
+
+// ---------- Startup sequence with splash (v1.7.0) ----------
+async function runStartup() {
+  openLoading('startup');
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const steps = [
+    'Preparing GTAMP data folders',
+    'Checking launcher version',
+    'Locating Grand Theft Auto V',
+    'Verifying your GTA V copy',
+    'Connecting to Rockstar Games services',
+    'Starting multiplayer services',
+    'Starting GTAMP'
+  ].map(label => ({ label, state: 'pending' }));
+  const draw = () => loadingSteps(steps);
+  draw();
+  const finish = async (i, sub) => { steps[i].state = 'done'; draw(); if (sub) loadingStatus('', sub); await sleep(150); };
+
+  // 1 — folders + hook server
+  steps[0].state = 'active'; draw();
+  loadingStatus('STARTING GTAMP', 'Preparing data folders…');
+  ensureDataDirs();
+  try { ensureHookTcpServer(); } catch (e) { console.error(e); }
+  await finish(0);
+
+  // 2 — version
+  steps[1].state = 'active'; draw();
+  loadingStatus('STARTING GTAMP', 'GTAMP Launcher v' + LAUNCHER_VER);
+  await sleep(220); await finish(1, 'v' + LAUNCHER_VER);
+
+  // 3 — locate GTA V
+  steps[2].state = 'active'; draw();
+  loadingStatus('LOCATING GRAND THEFT AUTO V', 'Scanning install locations…');
+  if (!config.gtaPath) {
+    try { const d = await detectGTAPath(); if (d) { config.gtaPath = d; saveConfig(config); } } catch {}
+  }
+  await finish(2, config.gtaPath || 'not found automatically');
+
+  // 4 — ownership verification
+  steps[3].state = 'active'; draw();
+  loadingStatus('VERIFYING GAME OWNERSHIP', 'Checking your GTA V files…');
+  const verify = verifyGtaOwnership(config.gtaPath);
+  await sleep(350);
+  if (verify.ok) {
+    await finish(3, (verify.edition === 'enhanced' ? 'GTAV Enhanced' : 'GTAV Legacy') + ' · ' + (verify.platform || 'PC'));
+  } else if (process.platform === 'win32') {
+    steps[3].state = 'failed'; draw();
+    loadingStatus('VERIFICATION FAILED', 'GTAMP could not verify a genuine copy of GTA V.');
+    const choice = await waitStartupChoice(verify);
+    if (choice === 'quit') { app.quit(); return; }
+    return runStartup(); // picked a folder / retry — start over
+  } else {
+    steps[3].label = 'Verifying your GTA V copy (skipped — dev platform)';
+    await finish(3, 'unverified (non-Windows dev)');
+  }
+
+  // 5 — Rockstar services handshake
+  steps[4].state = 'active'; draw();
+  const platNote = verify.platform === 'steam' ? 'Steam' : verify.platform === 'epic' ? 'Epic Games Launcher' : 'Rockstar Games Launcher';
+  loadingStatus('CONNECTING TO ROCKSTAR GAMES SERVICES', 'Activating via ' + platNote + '…');
+  await sleep(500); await finish(4, platNote);
+
+  // 6 — multiplayer services (FXServer)
+  steps[5].state = 'active'; draw();
+  loadingStatus('STARTING MULTIPLAYER SERVICES', 'Relay + master list…');
+  try {
+    const { FXServer } = require(path.join(__dirname, '..', 'fxserver', 'index.js'));
+    const fx = new FXServer({ port: 22005, platformPort: 22003, name: 'GTAMP Official (Local)' });
+    fxServerInfo = await fx.start();
+    console.log('[Main] FXServer up:', fxServerInfo);
+  } catch (e) {
+    console.error('[Main] FXServer failed:', e);
+    fxServerInfo = { gamePort: 22005, platformPort: 22003, resourcePort: 22010, platformUrl: 'http://127.0.0.1:22003', error: e.message };
+  }
+  // Discord presence (non-blocking)
+  try {
+    const dr = discordRpc.start({
+      enabled: config.discordRpc !== false,
+      clientId: config.discordAppId || process.env.GTAMP_DISCORD_APP_ID || ''
+    });
+    if (dr.ok) discordRpc.setInLauncher();
+  } catch (e) { console.error('[Main] discord rpc', e); }
+  await finish(5);
+
+  // 7 — open the launcher
+  steps[6].state = 'active'; draw();
+  loadingStatus('STARTING GTAMP', 'Opening launcher…');
+  await sleep(350);
+  steps[6].state = 'done'; draw();
+  loadingStatus('READY', 'Welcome to GTAMP', 1);
+  await sleep(450);
+  closeLoading();
+  createWindow();
+  ensureTray();
+  startupDone = true;
+}
+
+function waitStartupChoice(verify) {
+  return new Promise(resolve => {
+    startupCtl = { resolve };
+    sendLoading('error', {
+      title: 'No genuine GTA V found',
+      detail: 'GTAMP requires a legitimate PC copy of Grand Theft Auto V. If it is installed, select its folder (the one containing GTA5.exe / PlayGTAV.exe).\n\n' +
+        (verify.checks || []).map(c => (c.ok ? '✓ ' : '✗ ') + c.label).join('\n'),
+      actions: [
+        { id: 'pickFolder', label: 'Choose GTA V folder…' },
+        { id: 'retry', label: 'Retry' },
+        { id: 'quit', label: 'Quit' }
+      ]
+    });
+  });
+}
+
+async function pickGtaFolderDialog() {
+  const parent = loadingWin || mainWindow;
+  const res = await dialog.showOpenDialog(parent, { properties: ['openDirectory'], title: 'Select Grand Theft Auto V folder' });
+  return (!res.canceled && res.filePaths[0]) ? res.filePaths[0] : null;
+}
+
+// Actions from loading.html buttons (startup errors + connect cancel)
+ipcMain.on('loading:action', (_e, act) => {
+  const id = typeof act === 'string' ? act : (act && act.id);
+  if (connectCtl && ['cancel', 'retry', 'retryInject', 'pickFolder', 'quit'].includes(id)) {
+    (async () => {
+      if (id === 'cancel') return connectCtl.cancel();
+      if (id === 'quit') return app.quit();
+      if (id === 'pickFolder') {
+        const p = await pickGtaFolderDialog();
+        if (p) { config.gtaPath = p; saveConfig(config); connectCtl.retry(); }
+        return;
+      }
+      connectCtl.retry(); // 'retry' / 'retryInject' both restart the connect flow
+    })();
+    return;
+  }
+  if (startupCtl && startupCtl.resolve) {
+    (async () => {
+      if (id === 'pickFolder') {
+        const p = await pickGtaFolderDialog();
+        if (p) { config.gtaPath = p; saveConfig(config); }
+        const r = startupCtl.resolve; startupCtl = null; r('retry');
+      } else if (id === 'retry') {
+        const r = startupCtl.resolve; startupCtl = null; r('retry');
+      } else if (id === 'quit') {
+        const r = startupCtl && startupCtl.resolve; startupCtl = null; r('quit');
+      }
+    })();
+  }
+});
+
+// ---------- Connect flow: join server with FiveM-style loading (v1.7.0) ----------
+async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
+  const serverName = serverAddr || 'GTAMP Official #1';
+  if (connectCtl) { const old = connectCtl; connectCtl = null; try { await old.cancel(true); } catch {} }
+  const ctl = {
+    cancelled: false,
+    events: {},
+    _waiters: new Map(),
+    event(name) {
+      ctl.events[name] = true;
+      const w = ctl._waiters.get(name) || [];
+      ctl._waiters.delete(name);
+      w.forEach(fn => fn());
+    },
+    waitFor(name, timeoutMs) {
+      if (ctl.events[name]) return Promise.resolve(true);
+      return new Promise(res => {
+        let done = false;
+        const to = setTimeout(() => { if (!done) { done = true; res(false); } }, timeoutMs);
+        const arr = ctl._waiters.get(name) || [];
+        arr.push(() => { if (!done) { done = true; clearTimeout(to); res(true); } });
+        ctl._waiters.set(name, arr);
+      });
+    },
+    async retry() {
+      try { await ctl.cancel(true); } catch {}
+      runConnectFlow({ launch, serverAddr, effectiveAddr });
+    },
+    async cancel(silent) {
+      ctl.cancelled = true;
+      stopGtaExitWatch();
+      try { if (injectorProc && !injectorProc.killed) injectorProc.kill(); } catch {}
+      if (!silent) { try { discordRpc.setInLauncher(); } catch {} }
+      closeLoading();
+      if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
+    }
+  };
+  connectCtl = ctl;
+  const sleep = (ms) => new Promise(r => { const t = setTimeout(r, ms); });
+  const stepDefs = [
+    ['Verifying GTA V ownership', 'VERIFYING GAME OWNERSHIP'],
+    ['Starting ' + (launch.ensurePlatform === 'steam' ? 'Steam' : launch.ensurePlatform === 'epic' ? 'Epic' : 'Rockstar') + ' platform', 'STARTING GAME PLATFORM'],
+    ['Launching Grand Theft Auto V', 'STARTING GTA V'],
+    ['Waiting for GTA5.exe', 'WAITING FOR GTA5.EXE'],
+    ['Injecting GTAMP hook', 'INJECTING GTAMP HOOK'],
+    ['Linking multiplayer hook', 'LINKING MULTIPLAYER HOOK'],
+    ['Connecting to server', 'CONNECTING TO ' + serverName.toUpperCase()],
+    ['Spawning into session', 'LOADING INTO SESSION']
+  ];
+  const steps = stepDefs.map(d => ({ label: d[0], state: 'pending' }));
+  const setStep = (i, state, sub) => {
+    steps[i].state = state; loadingSteps(steps);
+    if (sub !== undefined) loadingStatus(stepDefs[i][1], sub);
+  };
+  const fail = (i, title, detail, actions) => {
+    setStep(i, 'failed');
+    sendLoading('error', { title, detail, actions: actions || [{ id: 'retry', label: 'Retry' }, { id: 'cancel', label: 'Cancel' }] });
+  };
+
+  // Net endpoints first, so the hook has somewhere to land
+  try { ensureHookTcpServer(); } catch (e) { writeLaunchDiag(['ensureHookTcpServer: ' + e.message]); }
+  try {
+    ensureMpUdp(effectiveAddr);
+    writeLaunchDiag(['MP join scheduled -> ' + effectiveAddr + ' nick=' + (config.nickname || 'Player')]);
+    try { discordRpc.setConnecting(serverAddr || 'Local GTAMP', effectiveAddr); } catch {}
+  } catch (e) { writeLaunchDiag(['ensureMpUdp failed: ' + e.message]); }
+
+  openLoading('connect', { server: serverName });
+  if (mainWindow) mainWindow.hide();
+  ensureTray();
+  loadingSteps(steps);
+  loadingStatus('CONNECTING TO ' + serverName.toUpperCase(), '');
+
+  // STEP 0 — ownership
+  setStep(0, 'active', 'Checking your game files…');
+  const v = verifyGtaOwnership(config.gtaPath);
+  await sleep(250);
+  if (ctl.cancelled) return;
+  if (!v.ok) {
+    fail(0, 'Could not verify GTA V',
+      'GTAMP needs a genuine, fully installed copy.\n\n' + v.checks.map(c => (c.ok ? '✓ ' : '✗ ') + c.label).join('\n'),
+      [{ id: 'pickFolder', label: 'Choose folder…' }, { id: 'cancel', label: 'Cancel' }]);
+    return;
+  }
+  setStep(0, 'done', (v.edition === 'enhanced' ? 'GTAV Enhanced' : 'GTAV Legacy') + ' · ' + (v.platform || 'PC'));
+
+  // STEP 1 — platform
+  setStep(1, 'active', launch.note || '…');
+  try {
+    if (launch.ensurePlatform) {
+      ensurePlatformRunning(launch.ensurePlatform);
+      try { require('child_process').execSync('ping 127.0.0.1 -n 3 >nul', { windowsHide: true }); } catch {}
+    }
+  } catch {}
+  if (ctl.cancelled) return;
+  setStep(1, 'done');
+
+  // STEP 2 — launch GTA
+  setStep(2, 'active', launch.note || '');
+  try {
+    const useShell = !!launch.shell || launch.kind === 'steam-url' || launch.kind === 'epic';
+    writeLaunchDiag(['launching kind=' + launch.kind, 'exe=' + launch.exe, 'args=' + JSON.stringify(launch.args || []), launch.note || '']);
+    gameProc = spawn(launch.exe, launch.args || [], {
+      cwd: launch.cwd || config.gtaPath, detached: true, stdio: 'ignore',
+      shell: useShell, windowsHide: false
+    });
+    gameProc.unref();
+    gameProc.on('error', e => writeLaunchDiag(['game launch error: ' + e.message]));
+  } catch (e) {
+    fail(2, 'Could not start GTA V', e.message);
+    return;
+  }
+  await sleep(1200);
+  if (ctl.cancelled) return;
+  setStep(2, 'done');
+
+  // STEP 3 — wait for GTA5.exe
+  setStep(3, 'active', 'The game can take a minute to appear…');
+  const waitMs = (launch.injectWaitMs || 90000) + 60000;
+  const t0 = Date.now();
+  let found = false;
+  while (Date.now() - t0 < waitMs) {
+    if (ctl.cancelled) return;
+    found = gtaRunning();
+    if (found) break;
+    const left = Math.ceil((waitMs - (Date.now() - t0)) / 1000);
+    loadingStatus('WAITING FOR GTA5.EXE', 'This can take a minute — up to ' + left + 's remaining');
+    await sleep(2000);
+  }
+  if (ctl.cancelled) return;
+  if (!found) {
+    fail(3, 'GTA5.exe never appeared',
+      'The game did not start. Retry, or start GTA V yourself and press Retry Inject.',
+      [{ id: 'retryInject', label: 'Retry Inject' }, { id: 'cancel', label: 'Cancel' }]);
+    return;
+  }
+  setStep(3, 'done', 'GTA5.exe found');
+
+  // STEP 4 — inject
+  setStep(4, 'active', 'gtamp_hook.dll → GTA5.exe');
+  writeLaunchDiag(['GTA5.exe detected — injecting GTAMP hook']);
+  const injRes = runInjector();
+  await sleep(1200);
+  if (ctl.cancelled) return;
+  if (!injRes.ok) { fail(4, 'Injection failed', injRes.error || 'unknown'); return; }
+  setStep(4, 'done');
+
+  // STEP 5 — hook link
+  setStep(5, 'active', 'Waiting for the hook to report in…');
+  try { hookConnect(); } catch (e) {}
+  const helloOk = await ctl.waitFor('hookHello', 90000);
+  if (ctl.cancelled) return;
+  if (!helloOk) {
+    fail(5, 'Hook did not come online',
+      'The DLL was injected but never connected back. Antivirus may be blocking it — or try Retry Inject.',
+      [{ id: 'retryInject', label: 'Retry Inject' }, { id: 'cancel', label: 'Cancel' }]);
+    return;
+  }
+  setStep(5, 'done', 'hook online · F8 console + T chat active');
+  startGtaExitWatch();
+
+  // STEP 6 — server handshake
+  setStep(6, 'active', 'Handshaking with ' + effectiveAddr + '…');
+  const welcomeOk = await ctl.waitFor('welcome', 15000);
+  if (ctl.cancelled) return;
+  setStep(6, 'done', welcomeOk ? 'connected' : 'server unreachable — continuing offline');
+
+  // STEP 7 — spawn
+  setStep(7, 'active', 'Streaming world state…');
+  await ctl.waitFor('spawn', 15000);
+  if (ctl.cancelled) return;
+  setStep(7, 'done');
+
+  loadingStatus('IN SESSION — HAVE FUN!', 'GTAMP keeps running in the background', 1);
+  await sleep(1500);
+  closeLoading();
+  try { tray && tray.setToolTip('GTAMP — connected to ' + serverName); } catch {}
+  connectCtl = null;
+}
+
 // ---------- Window ----------
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -767,38 +1220,15 @@ function createWindow() {
 }
 
 // ---------- Lifecycle ----------
-app.whenReady().then(async () => {
-  try { ensureHookTcpServer(); } catch (e) { console.error(e); }
-  // Discord Rich Presence (Playing GTAMP)
-  try {
-    const dr = discordRpc.start({
-      enabled: config.discordRpc !== false,
-      clientId: config.discordAppId || process.env.GTAMP_DISCORD_APP_ID || ''
-    });
-    if (dr.ok) discordRpc.setInLauncher();
-    else writeLaunchDiag(['Discord RPC: ' + (dr.error || 'off') + ' — set Discord App ID in Settings']);
-  } catch (e) { console.error('[Main] discord rpc', e); }
-  ensureDataDirs();
-  if (!config.gtaPath) {
-    try { const d = await detectGTAPath(); if (d) { config.gtaPath = d; saveConfig(config); } } catch {}
-  }
-  try {
-    const { FXServer } = require(path.join(__dirname,'..','fxserver','index.js'));
-    const fx = new FXServer({ port: 22005, platformPort: 22003, name: 'GTAMP Official (Local)' });
-    fxServerInfo = await fx.start();
-    console.log('[Main] FXServer up:', fxServerInfo);
-  } catch (e) {
-    console.error('[Main] FXServer failed:', e);
-    fxServerInfo = { gamePort:22005, platformPort:22003, resourcePort:22010, platformUrl:'http://127.0.0.1:22003', error:e.message };
-  }
-  createWindow();
-  app.on('activate', () => { if (BrowserWindow.getAllWindows().length===0) createWindow(); });
-});
+// v1.7.0: splash screen FIRST (FiveM-style), main window only after startup done.
+app.whenReady().then(() => { runStartup(); });
+app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0 && startupDone) createWindow(); });
 app.on('window-all-closed', () => { cleanup(); if (process.platform!=='darwin') app.quit(); });
 app.on('before-quit', cleanup);
 Menu.setApplicationMenu(null);
 
 function cleanup() {
+  try { stopGtaExitWatch(); } catch {}
   try { stopWebsiteReporter(); } catch {}
   try { if (bridgeProc && !bridgeProc.killed) bridgeProc.kill(); } catch {}
   try { discordRpc.stop(); } catch {}
@@ -937,116 +1367,29 @@ ipcMain.handle('game:launch', (_e, {serverAddr} = {}) => {
 
   const host = '127.0.0.1';
   const gamePort = fxServerInfo?.gamePort || 22005;
-  const resPort = fxServerInfo?.resourcePort || 22010;
-  const platformUrl = fxServerInfo?.platformUrl || 'http://127.0.0.1:22003';
   const effectiveAddr = serverAddr || `${host}:${gamePort}`;
 
-  // Built-in MP relay: hook TCP 22100 + UDP join to FX server
-  try { ensureHookTcpServer(); } catch (e) { writeLaunchDiag(['ensureHookTcpServer: ' + e.message]); }
-  try {
-    ensureMpUdp(effectiveAddr);
-    writeLaunchDiag(['MP join scheduled -> ' + effectiveAddr + ' nick=' + (config.nickname || 'Player')]);
-    try {
-      discordRpc.setConnecting(serverAddr || 'Local GTAMP', effectiveAddr);
-    } catch {}
-  } catch (e) {
-    writeLaunchDiag(['ensureMpUdp failed: ' + e.message]);
-  }
-
-
   if (process.platform !== 'win32') {
+    // Dev path: no Windows game — still bring up MP link + pretend-connect
+    try { ensureHookTcpServer(); } catch (e) { writeLaunchDiag(['ensureHookTcpServer: ' + e.message]); }
+    try { ensureMpUdp(effectiveAddr); } catch (e) { writeLaunchDiag(['ensureMpUdp failed: ' + e.message]); }
     config.lastServer = effectiveAddr; saveConfig(config);
     addToHistory({name:'(dev) '+effectiveAddr, addr:effectiveAddr, mode:'Direct', joinedAt:Date.now()});
     return {ok:true, launched:'dev mode', server:effectiveAddr, launcherType:lt};
   }
 
-  try {
-    // FiveM-style: platform process first, then game through platform
-    if (launch.ensurePlatform) {
-      ensurePlatformRunning(launch.ensurePlatform);
-      // Give Steam/RGL a moment to come up before game start
-      try { require('child_process').execSync('ping 127.0.0.1 -n 3 >nul', { windowsHide: true }); } catch {}
-    }
-    const useShell = !!launch.shell || launch.kind === 'steam-url' || launch.kind === 'epic';
-    writeLaunchDiag([
-      'launching kind=' + launch.kind,
-      'exe=' + launch.exe,
-      'args=' + JSON.stringify(launch.args || []),
-      'injectWaitMs=' + (launch.injectWaitMs || 90000),
-      launch.note || ''
-    ]);
-    gameProc = spawn(launch.exe, launch.args || [], {
-      cwd: launch.cwd || config.gtaPath,
-      detached: true,
-      stdio: 'ignore',
-      shell: useShell,
-      windowsHide: false
-    });
-    gameProc.unref();
-    gameProc.on('error', e => {
-      console.error('[Main] game launch error:', e.message);
-      writeLaunchDiag(['game launch error: ' + e.message]);
-    });
-
-    // Record in history
-    addToHistory({
-      name: serverAddr ? 'Direct: '+serverAddr : 'GTAMP Official #1',
-      addr: effectiveAddr,
-      mode: serverAddr ? 'Direct' : 'Freeroam',
-      joinedAt: Date.now()
-    });
-
-    // Diagnostics so user can find why hook is missing (TEMP\gtamp_status.txt)
-    writeLaunchDiag([
-      'game:launch',
-      'nativeDir=' + nativeDir,
-      'injectorPath=' + injectorPath + ' exists=' + fs.existsSync(injectorPath),
-      'dllPath=' + dllPath + ' exists=' + fs.existsSync(dllPath),
-      'gtaPath=' + config.gtaPath,
-      'server=' + effectiveAddr,
-      'isPackaged=' + app.isPackaged,
-      'resourcesPath=' + (process.resourcesPath || ''),
-      'NOTE: hook log appears at %TEMP%\\gtamp_hook.log ONLY after DLL injects',
-      'NOTE: injector log also at %TEMP%\\gtamp_injector.log'
-    ]);
-
-    // Inject when GTA5.exe appears (watcher — more robust than a single fixed delay).
-    // Polls tasklist every 2s for up to ~3 min, so a fresh OR already-running GTA is
-    // caught. A manual INJECT button in the top bar forces injection anytime too.
-    const injectUntil = Date.now() + ((launch && launch.injectWaitMs) || 180000);
-    const waitForInject = () => {
-      if (Date.now() > injectUntil) return;
-      let found = false;
-      try {
-        const out = require('child_process').execSync(
-          'tasklist /FI "IMAGENAME eq GTA5.exe" /NH', { windowsHide:true, encoding:'utf8', timeout:5000 }) || '';
-        found = /GTA5\.exe/i.test(out);
-      } catch { found = false; }
-      if (found) {
-        writeLaunchDiag(['GTA5.exe detected — injecting GTAMP hook']);
-        runInjector();
-      } else {
-        setTimeout(waitForInject, 2000);
-      }
-    };
-    writeLaunchDiag(['inject watcher started (checks for GTA5.exe every 2s, up to 3 min)']);
-    setTimeout(waitForInject, 8000);
-
-    // Hook proxy for renderer (control channel)
-    try { hookConnect(); } catch(e) { console.log('[Main] hookConnect err', e.message); }
-
-    config.lastServer = effectiveAddr;
-    saveConfig(config);
-    return {
-      ok: true,
-      launched: launch.kind,
-      server: effectiveAddr,
-      launcherType: lt,
-      injectScheduled: fs.existsSync(injectorPath) && fs.existsSync(dllPath),
-      note: launch.note || null,
-      injectWaitMs: launch.injectWaitMs || 90000
-    };
-  } catch (e) { return {ok:false, error:e.message}; }
+  // v1.7.0 — FiveM-style connect flow with a real loading window.
+  // Returns immediately; progress/failure is shown in the connect window.
+  addToHistory({
+    name: serverAddr ? 'Direct: '+serverAddr : 'GTAMP Official #1',
+    addr: effectiveAddr,
+    mode: serverAddr ? 'Direct' : 'Freeroam',
+    joinedAt: Date.now()
+  });
+  config.lastServer = effectiveAddr;
+  saveConfig(config);
+  runConnectFlow({ launch, serverAddr, effectiveAddr });
+  return { ok: true, launched: launch.kind, server: effectiveAddr, launcherType: lt, connecting: true };
 });
 
 function addToHistory(entry) {

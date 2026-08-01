@@ -53,8 +53,14 @@ contextBridge.exposeInMainWorld('gtamp', {
     send: (obj) => ipcRenderer.invoke('hook:send', obj),
     inject: () => ipcRenderer.invoke('game:inject')
   },
+  loading: {
+    onStatus: (cb) => ipcRenderer.on('loading:status', (_e, d) => cb(d)),
+    onSteps: (cb) => ipcRenderer.on('loading:steps', (_e, d) => cb(d)),
+    onError: (cb) => ipcRenderer.on('loading:error', (_e, d) => cb(d)),
+    action: (id) => ipcRenderer.send('loading:action', id)
+  },
   on: (channel, cb) => {
-    const allowed = ['game:status', 'master:update', 'server:info', 'hook:status', 'hook:event'];
+    const allowed = ['game:status', 'game:closed', 'master:update', 'server:info', 'hook:status', 'hook:event'];
     if (allowed.includes(channel)) ipcRenderer.on(channel, (_e, ...a) => cb(...a));
   }
 });
