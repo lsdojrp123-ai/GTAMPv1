@@ -1,4 +1,5 @@
-/* GTAMP Hook v1.8.0 - Phase 6 remote players + Phase 7 chat + v1.8.0 FiveM-style join UX: in-game connect panel, F8 console (pre-SHV), T chat. */
+/* GTAMP Hook v2.2.0 - resolves GTA natives ITSELF (FiveM rage-scripting-five behavior port, own_invoker.h):
+ * stale ScriptHookV native databases can no longer stop multiplayer with "FATAL: Can't find native". */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <winsock2.h>
@@ -17,7 +18,7 @@
 #pragma comment(lib,"version.lib")
 #pragma comment(lib,"winmm.lib")
 
-#define HOOK_VER "2.1.1"
+#define HOOK_VER "2.2.0"
 #define OVERLAY_KEY RGB(255,0,255)
 #define OV_CLASS "GTAMP_OV160"
 static volatile bool g_running=true;
@@ -719,6 +720,19 @@ static void __cdecl shvScriptMain(){
     logf("SHV scriptMain: entered (v" HOOK_VER ")");g_shvEntered=true;using namespace shv;
     const uint64_t H_PLAYER_ID=0x4F8644AF03D0E0D6ULL,H_PPID=0xD80958FC74E988A6ULL,H_GEC=0x3FEF770D40960D5AULL,H_GEH=0xE83D4F9BA2A38914ULL;
     wait(5000);logf("SHV: initial 5s wait done.");int pidx=0;DWORD lastTick=0,lastPosSend=0,lastNetTick=0;DWORD t0=timeGetTime();
+    // v2.2.0 — light up GTAMP's own native engine BEFORE the first native call (FiveM behavior).
+    // The game table is populated by the time we run (window existed at inject), so this normally
+    // succeeds on attempt #1. Failures retry (the game may still be mid-load); after ~40s the hook
+    // permanently falls back to the ScriptHookV exports (v2.1.1 path).
+    {static bool announced=false;
+     for(int i=0;i<40 && own::state()==0 && g_running;i++){ own::init(g_base,(uint32_t)g_size); if(own::state()==0) wait(1000); }
+     if(own::active()){
+         if(!announced){announced=true;logf("owninv: ACTIVE — %d natives in table; ScriptHookV is now only the fiber scheduler",own::natives());
+             sendJson("{\"t\":\"nativeScan\",\"own\":1,\"natives\":%d}",own::natives());}
+     } else {
+         own::fail();logf("owninv: UNAVAILABLE after retries — using ScriptHookV native path (update ScriptHookV if it cannot resolve natives)");
+         sendJson("{\"t\":\"nativeScan\",\"own\":0}");
+     }}
     while(g_running){wait(0);DWORD now=timeGetTime();
         if(!g_localPed){static DWORD lt=0;if(now-lt>500){lt=now;pidx=Invoker(H_PLAYER_ID).reti();int p=Invoker(H_PPID).reti();if(p&&timeGetTime()-t0>8000){g_localPed=p;g_shvReady=true;logf("SHV READY: playerIdx=%d ped=0x%X (uptime=%ums) netPeds=%d",pidx,p,(unsigned)(timeGetTime()-t0),g_netPedCount);strcpy_s(g_f.err,"Scanning mem for ped...");sendJson("{\"t\":\"ready\",\"ped\":%d,\"uptime\":%lu}",p,(unsigned long)(timeGetTime()-t0));if(g_gta&&IsWindow(g_gta)){SetForegroundWindow(g_gta);logf("brought GTA window to front");}}else{static DWORD ll=0;if(now-ll>3000){ll=now;logf("SHV: waiting for ped... t=%ums p=%d",(unsigned)(timeGetTime()-t0),p);}}}continue;}
         // Apply remote-ped movement every tick (smooth)
@@ -987,8 +1001,10 @@ static LRESULT CALLBACK wndProc(HWND w,UINT m,WPARAM a,LPARAM b){
             ovText(dc,fS,20,44,ln,RGB(220,224,232));
             if(shv::loaded()){
                 COLORREF c=g_shvReady?RGB(120,220,120):RGB(255,200,80);
-                snprintf(ln,sizeof(ln),"ScriptHookV: OK  script=%s  spawns=%d  remotePeds=%d",g_shvReady?"ready":"starting",g_shvSpawnCount,g_netPedCount);
-                ovText(dc,fS,20,64,ln,c);
+                snprintf(ln,sizeof(ln),"natives: %s  script=%s  spawns=%d  remotePeds=%d",
+                    own::active()?"GTAMP-OWN (no SHV DB)":(own::state()<0?"ScriptHookV (fallback)":"probing"),
+                    g_shvReady?"ready":"starting",g_shvSpawnCount,g_netPedCount);
+                ovText(dc,fS,20,64,ln,own::active()?RGB(120,220,255):c);
             } else ovText(dc,fS,20,64,"ScriptHookV.dll NOT FOUND",RGB(255,160,80));
             if(g_shvReady&&g_f.found){
                 snprintf(ln,sizeof(ln),"pos: %.1f,%.1f,%.1f  h=%.1f  bridge: %s",g_shvLastPedCoords.x,g_shvLastPedCoords.y,g_shvLastPedCoords.z,g_shvLastHeading,g_sock!=INVALID_SOCKET?"connected":"waiting");
@@ -1022,9 +1038,16 @@ ShowWindow(g_ov,(full||g_vis)?SW_SHOWNOACTIVATE:SW_HIDE);InvalidateRect(g_ov,NUL
   static DWORD lastW=0; DWORD nowW=timeGetTime();
   if(!g_shvFailNotified && g_shvEntered && g_shvTickMs!=0 && nowW-g_shvTickMs>8000 && nowW-lastW>2000){
     lastW=nowW; g_shvFailNotified=true; g_shvReady=false;
-    logf("SHV WATCHDOG: fiber frozen >8s — ScriptHookV cannot resolve natives on this GTA build (fatal dialog). shv=[%s]",
-      g_shvFileInfo[0]?g_shvFileInfo:"unknown");
-    sendJson("{\\\"t\\\":\\\"shvFail\\\",\\\"shv\\\":\\\"%s\\\"}", g_shvFileInfo[0]?g_shvFileInfo:"unknown");
+    if(own::active()){
+      // v2.2.0 — natives are ours; a frozen fiber is now a real engine stall, not a SHV database issue.
+      logf("WATCHDOG: fiber frozen >8s with own-native engine ACTIVE (real stall, not a ScriptHookV mismatch).");
+      sendJson("{\"t\":\"fiberFail\",\"engine\":\"own\"}");
+    } else {
+      // v2.2.0 fix — v2.1.1 sent this line over-escaped so the launcher's JSON parser dropped it.
+      logf("SHV WATCHDOG: fiber frozen >8s — ScriptHookV cannot resolve natives on this GTA build (fatal dialog). shv=[%s]",
+        g_shvFileInfo[0]?g_shvFileInfo:"unknown");
+      sendJson("{\"t\":\"shvFail\",\"shv\":\"%s\"}", g_shvFileInfo[0]?g_shvFileInfo:"unknown");
+    }
   }
 }if(GetAsyncKeyState(VK_F9)&1){g_vis=!g_vis;logf("overlay %s",g_vis?"on":"off");Sleep(250);}if(GetAsyncKeyState(VK_F10)&1){if(g_shvReady){logf("rescan (F10)");g_f.found=false;la=timeGetTime()-2000;doScan();}Sleep(250);}if(GetAsyncKeyState(VK_F11)&1){if(shv::loaded()){logf("F11 pressed - queuing local cop spawn (shvReady=%d)",(int)g_shvReady);SpawnReq r={0};strcpy_s(r.src,"F11");strcpy_s(r.model,"s_m_y_cop_01");r.useOffset=true;r.pedType=6;queueSpawn(&r);if(!g_shvReady)snprintf(g_shvMsg,sizeof(g_shvMsg),"F11 queued - will spawn once loaded");}else{logf("F11 pressed but SHV not loaded");snprintf(g_shvMsg,sizeof(g_shvMsg),"Waiting for ScriptHookV...");}Sleep(500);}{ // v1.8.0 — F8 console: works even before ScriptHookV is ready (like FiveM)
   static bool f8w=false,escw=false,retw=false,bkw=false;
@@ -1231,8 +1254,8 @@ static VOID WINAPI delayedShvLoad(PVOID){
             if(!GetModuleHandleW(pin[i])) LoadLibraryW(fp);
         }
     }
-    {HMODULE pe[2048];DWORD need=0;if(EnumProcessModules(GetCurrentProcess(),(HMODULE*)pe,sizeof(pe),&need)){DWORD n=need/sizeof(HMODULE);for(DWORD i=0;i<n&&i<512;i++){char nme[MAX_PATH]={0};if(GetModuleFileNameA(pe[i],nme,MAX_PATH)){const char*b=strrchr(nme,'\\');b=b?b+1:nme;if(strstr(b,"ScriptHook")||!_stricmp(b,"dinput8.dll")||!_stricmp(b,"ScriptHookV.dll")){logf("  module[%u]: %s @ %p",i,nme,(void*)pe[i]); if(strstr(b,"ScriptHook")&&!g_shvFileInfo[0])readShvFileInfo(nme);}}}}}for(int i=0;i<120&&g_running;i++){if(shv::load()){logf("ScriptHookV exports resolved OK");shv::registerScript(shvScriptMain);logf("scriptRegister called (fn=%p)",(void*)shvScriptMain);return;}if(i==0)logf("SHV not found initially (err=%u). Will retry.",(unsigned)GetLastError());Sleep(500);}logf("ScriptHookV not loadable after 60s.");
+    {HMODULE pe[2048];DWORD need=0;if(EnumProcessModules(GetCurrentProcess(),(HMODULE*)pe,sizeof(pe),&need)){DWORD n=need/sizeof(HMODULE);for(DWORD i=0;i<n&&i<512;i++){char nme[MAX_PATH]={0};if(GetModuleFileNameA(pe[i],nme,MAX_PATH)){const char*b=strrchr(nme,'\\');b=b?b+1:nme;if(strstr(b,"ScriptHook")||!_stricmp(b,"dinput8.dll")||!_stricmp(b,"ScriptHookV.dll")){logf("  module[%u]: %s @ %p",i,nme,(void*)pe[i]); if(strstr(b,"ScriptHook")&&!g_shvFileInfo[0])readShvFileInfo(nme);}}}}}for(int i=0;i<120&&g_running;i++){if(shv::load()){logf("ScriptHookV exports resolved OK");shv::registerScript(shvScriptMain);logf("scriptRegister called (fn=%p)",(void*)shvScriptMain);return;}if(i==0)logf("SHV not found initially (err=%u). Will retry.",(unsigned)GetLastError());Sleep(500);}logf("ScriptHookV not loadable after 60s.");sendJson("{\"t\":\"noShv\"}");
 }
 BOOL APIENTRY DllMain(HMODULE m,DWORD r,LPVOID){if(r==DLL_PROCESS_ATTACH){DisableThreadLibraryCalls(m);
-    InitializeCriticalSection(&g_qCs);InitializeCriticalSection(&g_npCs);InitializeCriticalSection(&g_sendCs);InitializeCriticalSection(&g_conCs);g_pid=GetCurrentProcessId();char t[MAX_PATH];GetTempPathA(MAX_PATH,t);strcat_s(t,MAX_PATH,"gtamp_hook.log");fclose(fopen(t,"w"));logf("==== GTAMP hook v%s PID=%u ====",HOOK_VER,(unsigned)g_pid);HMODULE hm=GetModuleHandleA("GTA5.exe");if(!hm){logf("ERROR: GTA5.exe not found");return TRUE;}detectBuild(hm);shv::setLogger([](const char*s){logf("%s",s);});shv::setSelfHinst(m);CloseHandle(CreateThread(NULL,0,(LPTHREAD_START_ROUTINE)delayedShvLoad,NULL,0,NULL));g_ovT=CreateThread(NULL,0,overlayThread,NULL,0,NULL);g_netT=CreateThread(NULL,0,netThread,NULL,0,NULL);}else if(r==DLL_PROCESS_DETACH){g_running=false;if(g_ovT){WaitForSingleObject(g_ovT,3000);CloseHandle(g_ovT);}if(g_netT){WaitForSingleObject(g_netT,3000);CloseHandle(g_netT);}DeleteCriticalSection(&g_qCs);DeleteCriticalSection(&g_npCs);DeleteCriticalSection(&g_sendCs);DeleteCriticalSection(&g_conCs);logf("unloaded");}return TRUE;}
+    InitializeCriticalSection(&g_qCs);InitializeCriticalSection(&g_npCs);InitializeCriticalSection(&g_sendCs);InitializeCriticalSection(&g_conCs);g_pid=GetCurrentProcessId();char t[MAX_PATH];GetTempPathA(MAX_PATH,t);strcat_s(t,MAX_PATH,"gtamp_hook.log");fclose(fopen(t,"w"));logf("==== GTAMP hook v%s PID=%u ====",HOOK_VER,(unsigned)g_pid);HMODULE hm=GetModuleHandleA("GTA5.exe");if(!hm){logf("ERROR: GTA5.exe not found");return TRUE;}detectBuild(hm);shv::setLogger([](const char*s){logf("%s",s);});shv::setSelfHinst(m);own::setLogger([](const char*s){logf("%s",s);});CloseHandle(CreateThread(NULL,0,(LPTHREAD_START_ROUTINE)delayedShvLoad,NULL,0,NULL));g_ovT=CreateThread(NULL,0,overlayThread,NULL,0,NULL);g_netT=CreateThread(NULL,0,netThread,NULL,0,NULL);}else if(r==DLL_PROCESS_DETACH){g_running=false;if(g_ovT){WaitForSingleObject(g_ovT,3000);CloseHandle(g_ovT);}if(g_netT){WaitForSingleObject(g_netT,3000);CloseHandle(g_netT);}DeleteCriticalSection(&g_qCs);DeleteCriticalSection(&g_npCs);DeleteCriticalSection(&g_sendCs);DeleteCriticalSection(&g_conCs);logf("unloaded");}return TRUE;}
 extern "C" __declspec(dllexport) const char* gtamp_version(){return "GTAMP Hook v" HOOK_VER;}

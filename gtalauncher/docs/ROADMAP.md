@@ -41,6 +41,16 @@
 - **T chat** in-game (FiveM keybinding); F9 toggles the debug HUD.
 - **Tray/background**: GTAMP keeps running in the tray while you play; quitting GTA returns you to the launcher; `disconnectSession` cleans the session from console/launcher.
 
+## v2.2.0 — GTAMP resolves GTA natives ITSELF (FiveM rage-scripting-five behavior port)
+- **The error class that blocked the user at v2.1.1 is deleted.** `FATAL: Can't find native` existed because we routed every native through the *user's* ScriptHookV.dll, whose embedded database must match the game build. FiveM doesn't have this problem because it resolves natives itself — now so do we.
+- **Own native engine** (`src/native/hook/own_invoker.h`): pattern-scan the game's 256-bucket registration table, de-obfuscate R*'s XOR-folded entries, resolve handlers, invoke with a rage-faithful call context. Behavior documented row-by-row in [FIVEM-PARITY.md](./FIVEM-PARITY.md) §5.
+- **Per-build re-key map** (`native_remap.h`, auto-generated from FiveM's published `CrossMapping_Universal.h` chains): all 48 re-keyed natives GTAMP uses resolve correctly on b2372 through every current build; 4 stable natives resolve directly.
+- **Defense in depth:** structural table validation, executable-check per handler, fast-path cache, miss logging. Any surprise → permanent, silent fallback to the ScriptHookV export path (v2.1.1 behavior preserved).
+- ScriptHookV's role shrinks to **fiber scheduler only** — it no longer needs a matching native database, so an old/forked ScriptHookV.dll stops being fatal to GTAMP.
+- New bridge events → exact cards: `nativeScan` (own engine active, N natives — shown in the live feed), `noShv` (ScriptHookV missing → install card), `fiberFail` (real engine stall, distinct from SHV mismatch).
+- v2.1.1 telemetry bug fixed: the `shvFail` bridge line was sent over-escaped; the launcher's JSON parser silently dropped it (card never appeared).
+- Launcher `2.2.0`, hook `2.2.0`, injector `2.2.0`.
+
 ## v2.1.1 — survive ScriptHookV's FATAL: report it, name it, fix it with one click
 - Progress report from the field: injection now works end-to-end (window-adoption delivered), and the first native call against the user's own ScriptHookV.dll produced `SCRIPT HOOK V CRITICAL ERROR — FATAL: Can't find native 0xEEF059A8E6C27644` (GET_ENTITY_HEALTH — a day-zero native). That signature means **the user's ScriptHookV.dll cannot resolve natives on their GTA V build** (game updated past the file, or a fork/old copy) — SHV fatales and kills our script fiber, and the launcher used to just sit at "linking multiplayer hook".
 - **Hook fiber watchdog.** The SHV script fiber timestamps every 50 ms tick; the overlay thread (independent of SHV) flags >8 s of post-entry silence, marks SHV dead, stops further native usage, and sends `{t:"shvFail", shv:"<file fingerprint>"}` over the bridge.

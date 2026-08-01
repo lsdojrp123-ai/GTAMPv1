@@ -9,6 +9,7 @@
 #include <math.h>
 #include <string.h>
 #include <ctype.h>
+#include "../hook/own_invoker.h"
 
 namespace shv {
     typedef void      (*NativeInit_t)(uint64_t hash);
@@ -109,17 +110,22 @@ namespace shv {
         if(g_wait) g_wait(ms);
     }
 
+    // v2.2.0 — GTAMP resolves natives itself first (FiveM behavior; own_invoker.h).
+    // ScriptHookV stays as the fiber scheduler and as the native fallback path.
     struct Invoker {
         uint64_t hash;
-        Invoker(uint64_t h):hash(h){ if(g_init) g_init(hash); }
-        Invoker& arg(uint64_t v){ if(g_push) g_push(v); return *this; }
+        own::NativeHandler ownFn;
+        uint64_t ownArgs[32];
+        uint32_t ownN;
+        Invoker(uint64_t h):hash(h),ownFn(own::resolve(h)),ownN(0){ if(!ownFn && g_init) g_init(hash); }
+        Invoker& arg(uint64_t v){ if(ownFn){ if(ownN<32) ownArgs[ownN++]=v; } else if(g_push) g_push(v); return *this; }
         Invoker& argf(float f){ uint64_t v=0; memcpy(&v,&f,4); return arg(v); }
         Invoker& argi(int v){ return arg((uint64_t)(int64_t)v); }
         Invoker& argu(uint32_t v){ return arg((uint64_t)v); }
         Invoker& argh(uint32_t h){ return argu(h); }
         Invoker& argb(bool v){ return arg(v?1ULL:0ULL); }
         Invoker& argp(void* p){ return arg((uintptr_t)p); }
-        uint64_t* call(){ return g_call ? g_call() : nullptr; }
+        uint64_t* call(){ if(ownFn) return own::invoke(ownFn,ownArgs,ownN); return g_call ? g_call() : nullptr; }
         int     reti(){ uint64_t* r=call(); return r?(int)(int64_t)*r:0; }
         float   retf(){ uint64_t* r=call(); if(!r)return 0.f; float f; memcpy(&f,r,4); return f; }
         void*   retp(){ uint64_t* r=call(); return r?(void*)(uintptr_t)*r:nullptr; }

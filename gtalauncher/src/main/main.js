@@ -389,6 +389,17 @@ function ensureHookTcpServer() {
           } else if (m.t === 'shvFail') {
             writeLaunchDiag(['HOOK SHV FAILURE — ScriptHookV cannot resolve natives on this GTA build. shv=[' + (m.shv || '?') + ']']);
             if (connectCtl) { connectCtl.shvFail = String(m.shv || ''); connectCtl.event('shvFail'); }
+          } else if (m.t === 'fiberFail') {
+            // v2.2.0 — fiber froze while GTAMP's OWN native engine was active (no SHV DB involved)
+            writeLaunchDiag(['HOOK ENGINE STALL — game fiber froze with GTAMP own-native engine active']);
+            if (connectCtl) connectCtl.event('fiberFail');
+          } else if (m.t === 'nativeScan') {
+            // v2.2.0 — GTAMP lit up its own FiveM-style native resolution
+            writeLaunchDiag([m.own ? ('OWN NATIVE ENGINE ACTIVE — ' + (m.natives || 0) + ' natives resolved without ScriptHookV\'s database') : 'own-native scan failed — using ScriptHookV native path']);
+            if (connectCtl) connectCtl.event('nativeScan', m.own ? 'own' : 'shv');
+          } else if (m.t === 'noShv') {
+            writeLaunchDiag(['HOOK: ScriptHookV.dll not found in GTA after 60s']);
+            if (connectCtl) connectCtl.event('noShv');
           } else if (m.t === 'ready') {
             writeLaunchDiag(['hook SHV ready ped=' + m.ped]);
             if (connectCtl) connectCtl.event('hookReady');
@@ -822,7 +833,7 @@ function verifyGtaOwnership(dir) {
 }
 
 // ---------- Loading window: startup splash + server connect (v1.7.0) ----------
-const LAUNCHER_VER = '2.1.1';
+const LAUNCHER_VER = '2.2.0';
 function openLoading(mode, opts = {}) {
   closeLoading();
   loadingWin = new BrowserWindow({
@@ -1477,12 +1488,31 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
     } catch {}
   };
   // v2.1.1 — the hook reports ScriptHookV's FATAL "can't find native" (build mismatch) via its
-  // fiber watchdog; turn it into an exact, actionable card instead of a silent dead connect
+  // fiber watchdog; turn it into an exact, actionable card instead of a silent dead connect.
+  // v2.2.0 — GTAMP resolves natives ITSELF (FiveM-style), so this card now only fires when BOTH
+  // the own-native scan AND ScriptHookV fail — i.e. an exotic build. Still offer the SHV refresh.
   const shvFailCard = () => fail(9, 'ScriptHookV cannot run on your GTA V build',
-    'GTA just showed SCRIPT HOOK V CRITICAL ERROR — FATAL: cannot find native — and GTAMP is telling you why: the ScriptHookV.dll in your GTA folder cannot resolve game functions on your GTA V build (GTA updated past it, or it is an old/forked copy: [' + (ctl.shvFail || 'unknown file') + ']).' +
+    'GTAMP first tried to resolve game functions ITSELF (like FiveM does), then fell back to ScriptHookV — and ScriptHookV is the piece that failed on your GTA V build (its native database does not match: [' + (ctl.shvFail || 'unknown file') + ']).' +
     '\n\nOne-minute fix:\n1) Press OPEN SCRIPTHOOK DOWNLOAD (official dev-c.com page).\n2) From the ZIP, copy ScriptHookV.dll AND dinput8.dll into your GTA V folder (overwrite old ones).\n3) Close GTA completely, then press Retry Inject here.' +
-    '\n\nGTAMP drives other players through ScriptHookV, so the file must match your game — like FiveM shipping its own matching layer.',
+    '\n\nIf this keeps appearing, send the clipboard diagnostics — your build needs a new entry in GTAMP\'s own engine.',
     [{ id: 'updateShv', label: 'Open ScriptHookV download' }, { id: 'retryInject', label: 'Retry Inject' }, { id: 'cancel', label: 'Cancel' }]);
+  // v2.2.0 — fiber froze while GTAMP's own engine was driving natives (real stall, not SHV)
+  const fiberFailCard = () => fail(9, 'In-game engine stalled',
+    'GTAMP\'s own native engine was ACTIVE and the game fiber stopped responding for 8+ seconds. This is a real stall inside GTA, not a ScriptHookV mismatch.' +
+    '\n\nDo this:\n1) Close GTA completely (Task Manager → GTA5.exe if it hangs).\n2) If an ENB/ReShade overlay is enabled, try closing GTA, disabling it, then Retry Inject.' +
+    '\n3) Press Retry Inject. If it stalls twice in a row, send the clipboard diagnostics.',
+    [{ id: 'retryInject', label: 'Retry Inject' }, { id: 'cancel', label: 'Cancel' }]);
+  // v2.2.0 — ScriptHookV.dll absent from the GTA folder entirely (fiber scheduler missing)
+  const noShvCard = () => fail(9, 'ScriptHookV is not installed',
+    'GTAMP injected into GTA but never found ScriptHookV.dll within 60 seconds. ScriptHookV is only needed as the in-game fiber scheduler (GTAMP resolves game functions itself now), but the game cannot run GTAMP\'s logic without it.' +
+    '\n\nOne-minute fix:\n1) Press OPEN SCRIPTHOOK DOWNLOAD (official dev-c.com page).\n2) From the ZIP, copy ScriptHookV.dll AND dinput8.dll into your GTA V folder (same folder as GTA5.exe).\n3) Close GTA completely, then press Retry Inject.',
+    [{ id: 'updateShv', label: 'Open ScriptHookV download' }, { id: 'retryInject', label: 'Retry Inject' }, { id: 'cancel', label: 'Cancel' }]);
+  const hookFailEvt = (ms) => Promise.race([
+    ctl.waitFor('shvFail', ms).then(() => 'shvFail'),
+    ctl.waitFor('fiberFail', ms).then(() => 'fiberFail'),
+    ctl.waitFor('noShv', ms).then(() => 'noShv')
+  ]);
+  const hookFailCard = (kind) => kind === 'noShv' ? noShvCard() : kind === 'fiberFail' ? fiberFailCard() : shvFailCard();
   const fail = (i, title, detail, actions) => {
     setStep(i, 'failed');
     const diagText = 'GTAMP v' + LAUNCHER_VER + ' — connect failure: ' + title + '\n' + (detail || '') +
@@ -1812,9 +1842,12 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
   // STEP 10 — hook link
   setStep(10, 'active', 'Waiting for the hook to report in…');
   try { hookConnect(); } catch (e) {}
-  const helloOk = await Promise.race([ctl.waitFor('hookHello', 90000), ctl.waitFor('shvFail', 90000).then(() => 'shvFail')]);
+  const helloOk = await Promise.race([ctl.waitFor('hookHello', 90000), hookFailEvt(90000)]);
   if (ctl.cancelled) return;
-  if (ctl.events['shvFail']) { shvFailCard(); return; }
+  {
+    const hk = ['shvFail','fiberFail','noShv'].find(k => ctl.events[k]);
+    if (hk) { hookFailCard(hk); return; }
+  }
   if (helloOk !== true) {
     fail(10, 'Hook did not come online',
       'The DLL was injected but never connected back. Antivirus may be blocking it — or try Retry Inject.',
@@ -1827,17 +1860,23 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
   // STEP 11 — server handshake
   setStep(11, 'active', 'Handshaking with ' + effectiveAddr + '…');
   try { hookBroadcast({ t: 'joinStage', stage: 'Handshaking with server' }); } catch {}
-  const welcomeOk = await Promise.race([ctl.waitFor('welcome', 15000), ctl.waitFor('shvFail', 15000).then(() => 'shvFail')]);
+  const welcomeOk = await Promise.race([ctl.waitFor('welcome', 15000), hookFailEvt(15000)]);
   if (ctl.cancelled) return;
-  if (ctl.events['shvFail']) { shvFailCard(); return; }
+  {
+    const hk = ['shvFail','fiberFail','noShv'].find(k => ctl.events[k]);
+    if (hk) { hookFailCard(hk); return; }
+  }
   setStep(11, 'done', welcomeOk ? 'connected' : 'server unreachable — continuing offline');
 
   // STEP 12 — spawn
   setStep(12, 'active', 'Streaming world state…');
   try { hookBroadcast({ t: 'joinStage', stage: 'Loading session — streaming world' }); } catch {}
-  await Promise.race([ctl.waitFor('spawn', 15000), ctl.waitFor('shvFail', 15000).then(() => null)]);
+  await Promise.race([ctl.waitFor('spawn', 15000), hookFailEvt(15000)]);
   if (ctl.cancelled) return;
-  if (ctl.events['shvFail']) { shvFailCard(); return; }
+  {
+    const hk = ['shvFail','fiberFail','noShv'].find(k => ctl.events[k]);
+    if (hk) { hookFailCard(hk); return; }
+  }
   setStep(12, 'done');
 
   loadingStatus('IN SESSION — HAVE FUN!', 'GTAMP keeps running in the background', 1);

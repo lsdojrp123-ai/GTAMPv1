@@ -49,3 +49,26 @@ same stage ordering — never ripped FiveM assets or verbatim code).
 | fivem.net landing (hero, download, FAQ, legal) | GTAMP homepage rebuilt to the same measurements (original art/copy) |
 | Server list with live "playing now" counts | `/api/servers/live`, Direct Connect by ip:port |
 | Match server protocol to client version | `/api/launcher/version` (above) |
+
+## 5. Native invocation (`code/components/rage-scripting-five`) — v2.2.0
+
+FiveM resolves every script native **itself**; ScriptHookV, by contrast, ships a native
+database that dies with `FATAL: Can't find native 0x…` whenever it doesn't match the game
+build. GTAMP v2.2.0 ports the *behavior* of FiveM's native resolution into
+`src/native/hook/own_invoker.h` (our own code, documented here):
+
+| FiveM component | GTAMP v2.2.0 |
+|---|---|
+| `scrEngine.cpp` — locate the 256-bucket native registration table via pattern `76 32 48 8B 53 40`, RIP-relative reference at match+9 (`target = +9 + disp32 + 4`) | Identical pattern + identical scalar math, plus belt-and-braces validation: single-shot scan of the whole game image, structural proof of the table (256 buckets, readable chains, counts 1–7, >1000 natives), executable-check on every resolved handler — any surprise leaves the path disabled |
+| `NativeRegistration_obf` — R* XOR-folds next-pointer / entry-count / per-entry hash through the address where each field lives | Same de-obfuscation (fold key = low32(field address) ^ low32(second key word), applied dword-wise to the stored qwords) |
+| `TableBuilder.cpp` + `CrossMapping_Universal.h` — R* re-keys native hashes between builds; FiveM keeps a 28-slot chain per native indexed by build (slot 27 = b2944+, i.e. every current Legacy/Enhanced build) | `native_remap.h` (auto-generated, 48 rows) — for every native GTAMP uses we carry slots 24–27 straight from FiveM's published chain data. Resolution tries the **live table itself**, newest keying first, so no build detection is needed and a future re-key just falls through to the direct hash |
+| `scrThread.h` — `rage::scrNativeCallContext` layout (return/args buffers, 8-byte slots, vector staging space, `SetVectorResults` copy-out) | Byte-identical context layout; one shared 256-byte temp buffer for args+return (FiveM's own note: the game handles the aliasing); vector results land 1 float per 8-byte slot exactly like the ScriptHookV `ret3f` pattern our fiber already used |
+| `scrEngine::GetNativeHandler` + fast-path cache | Per-hash cache (128 entries) + miss logging to `%TEMP%\gtamp_hook.log` |
+
+**Fallback contract (unchanged):** ScriptHookV remains the fiber scheduler. If the own
+scan ever fails (pattern gone on an exotic build), the hook permanently falls back to the
+SHV export path — exactly the v2.1.1 behavior, watchdog and update-SHV card included.
+New bridge telemetry: `nativeScan` (own engine active, N natives) / `noShv` (SHV.dll
+absent after 60 s → install card) / `fiberFail` (fiber froze with own engine active →
+real-stall card). This kills the entire error class the user hit at v2.1.1 — a stale or
+forked ScriptHookV database can no longer stop the multiplayer engine.
