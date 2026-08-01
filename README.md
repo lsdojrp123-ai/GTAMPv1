@@ -7,7 +7,7 @@
 Electron launcher + native hook + FXServer-compatible node + community website.</p>
 
 <p align="center">
-  <a href="https://github.com/lsdojrp123-ai/GTAMPv1/releases/latest"><img src="https://img.shields.io/badge/latest-v1.9.5-e11d48?style=for-the-badge" alt="latest v1.9.5"></a>
+  <a href="https://github.com/lsdojrp123-ai/GTAMPv1/releases/latest"><img src="https://img.shields.io/badge/latest-v1.9.6-e11d48?style=for-the-badge" alt="latest v1.9.6"></a>
   <a href="https://github.com/lsdojrp123-ai/GTAMPv1/releases/latest"><img src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-1f2937?style=for-the-badge" alt="Windows x64"></a>
   <a href="https://github.com/citizenfx/fivem"><img src="https://img.shields.io/badge/design%20parity-citizenfx%2Ffivem-374151?style=for-the-badge" alt="FiveM parity"></a>
 </p>
@@ -18,26 +18,25 @@ Electron launcher + native hook + FXServer-compatible node + community website.<
 
 | | |
 |---|---|
-| **Latest (v1.9.5)** | **[GTAMP-Launcher-v1.9.5.exe](https://github.com/lsdojrp123-ai/GTAMPv1/releases/download/v1.9.5/GTAMP-Launcher-v1.9.5.exe)** |
+| **Latest (v1.9.6)** | **[GTAMP-Launcher-v1.9.6.exe](https://github.com/lsdojrp123-ai/GTAMPv1/releases/download/v1.9.6/GTAMP-Launcher-v1.9.6.exe)** |
 | All releases | [github.com/lsdojrp123-ai/GTAMPv1/releases](https://github.com/lsdojrp123-ai/GTAMPv1/releases) |
 
 > ⚠️ **Delete every older `GTAMP-Launcher-*.exe` from your PC first.**
 > Old builds (v1.9.4 and earlier) do not inject correctly.
-> **How to know you're on the new one:** the launch card's bottom-right footer must read **`GTAMP v1.9.5`**.
+> **How to know you're on the new one:** the launch card's bottom-right footer must read **`GTAMP v1.9.6`**.
 > The footer text is baked into the exe — if it says anything older, you opened an old file.
 
 ## 🚀 Using it
 
 1. Own a legitimate copy of **GTA V** (Steam / Epic / Rockstar).
-2. Download & run **GTAMP-Launcher-v1.9.5.exe** (portable — nothing to install).
+2. Download & run **GTAMP-Launcher-v1.9.6.exe** (portable — nothing to install).
 3. Point it at your GTA V folder when asked, pick a server, press **Connect**.
 4. GTA already open in story mode? Leave it running — GTAMP **switches you into the session** without relaunching the game (FiveM `-switchcl`-style), then drops you in.
 
-## ✨ What's new in v1.9.5
+## ✨ What's new in v1.9.6
 
-- **Stuck "Waiting for game window" fixed for good** — if GTA V is already running, the window gate is skipped entirely; on a fresh launch the injector waits natively and, worst case, proceeds with a safe blind inject instead of stalling.
-- **Live connect card** — elapsed clock + raw stage lines; a screenshot now always tells us exactly where it is.
-- **Loud update notice** — the launcher tells you on step 4 when a newer version exists.
+- **🔄 Self-updating launcher (like FiveM).** Every startup now checks GitHub Releases for a newer build and **downloads + installs it automatically** with a live progress bar, then restarts into it — before GTA ever loads. **This is the last exe you ever fetch by hand.**
+- **Stall-proof connect flow.** The "waiting for game window" gate can no longer wedge: already-running games skip it, fresh launches cap it at 120 s and then inject anyway (a game alive that long is provably past graphics init), and untitled fullscreen windows now count after 30 s.
 - Native injector logs everything to `%TEMP%\gtamp_injector.log` for one-look diagnosis.
 
 Full history: [gtalauncher/docs/ROADMAP.md](gtalauncher/docs/ROADMAP.md) · FiveM behavior map: [gtalauncher/docs/FIVEM-PARITY.md](gtalauncher/docs/FIVEM-PARITY.md)
@@ -48,7 +47,7 @@ Full history: [gtalauncher/docs/ROADMAP.md](gtalauncher/docs/ROADMAP.md) · Five
 |---|---|
 | `gtalauncher/` | Electron launcher, native injector + in-game hook, FXServer node, docs |
 | `website/` | GTAMP community website (server + static build, launcher downloads) |
-| `GTAMP-Launcher-v1.9.5.exe` | Current launcher build (also attached to Releases) |
+| `GTAMP-Launcher-v1.9.6.exe` | Current launcher build (also attached to Releases) |
 
 ## 🛟 Troubleshooting
 

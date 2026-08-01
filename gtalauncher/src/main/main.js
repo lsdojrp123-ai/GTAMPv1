@@ -819,7 +819,7 @@ function verifyGtaOwnership(dir) {
 }
 
 // ---------- Loading window: startup splash + server connect (v1.7.0) ----------
-const LAUNCHER_VER = '1.9.5';
+const LAUNCHER_VER = '1.9.6';
 function openLoading(mode, opts = {}) {
   closeLoading();
   loadingWin = new BrowserWindow({
@@ -923,10 +923,25 @@ async function runStartup() {
   try { ensureHookTcpServer(); } catch (e) { console.error(e); }
   await finish(0);
 
-  // 2 — version
+  // 2 — version + FiveM-style self-update (Bootstrap parity: patch BEFORE anything else runs)
   steps[1].state = 'active'; draw();
   loadingStatus('STARTING GTAMP', 'GTAMP Launcher v' + LAUNCHER_VER);
-  await sleep(220); await finish(1, 'v' + LAUNCHER_VER);
+  await sleep(220);
+  try {
+    const upd = await checkForLauncherUpdate();
+    if (upd && cmpVer(upd.version, LAUNCHER_VER) > 0) {
+      steps[1].label = 'Updating GTAMP launcher (v' + LAUNCHER_VER + ' → v' + upd.version + ')'; draw();
+      const done = await doSelfUpdate(upd, loadingStatus, sleep);
+      if (done) return; // new exe was spawned; this process exits
+      steps[1].label = 'Checking launcher version'; draw();
+      await finish(1, 'update to v' + upd.version + ' could not be applied — continuing');
+    } else {
+      await finish(1, 'v' + LAUNCHER_VER + (upd ? ' (up to date)' : ''));
+    }
+  } catch (e) {
+    writeLaunchDiag(['update check error: ' + (e && e.message)]);
+    await finish(1, 'v' + LAUNCHER_VER);
+  }
 
   // 3 — locate GTA V
   steps[2].state = 'active'; draw();
@@ -1169,6 +1184,144 @@ function checkComponentUpdates() {
   });
 }
 
+// ---------- v1.9.6: FiveM-style self-update (Bootstrap.cpp parity: update BEFORE the app does anything) ----------
+// FiveM's bootstrapper phones home, downloads the delta/full update and restarts itself before
+// the game ever loads. We do the same against GitHub Releases (canonical, always latest) with
+// the community website as fallback. Old builds that lack this code only ever need ONE more
+// manual download — from v1.9.6 on, the launcher patches itself.
+const UPDATE_REPO = 'lsdojrp123-ai/GTAMPv1';
+function cmpVer(a, b) {
+  const pa = String(a).replace(/^v/, '').split('.').map(n => parseInt(n, 10) || 0);
+  const pb = String(b).replace(/^v/, '').split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) { const x = pa[i] || 0, y = pb[i] || 0; if (x !== y) return x - y; }
+  return 0;
+}
+function httpsJson(urlStr, timeoutMs = 5000) {
+  return new Promise((resolve) => {
+    try {
+      const u = new URL(urlStr);
+      const req = require('https').get({
+        hostname: u.hostname, port: u.port || 443, path: u.pathname + u.search,
+        headers: { 'User-Agent': 'GTAMP-Launcher/' + LAUNCHER_VER, 'Accept': 'application/vnd.github+json' },
+        timeout: timeoutMs
+      }, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          res.resume(); return httpsJson(res.headers.location, timeoutMs).then(resolve);
+        }
+        let b = ''; res.on('data', c => b += c);
+        res.on('end', () => { try { resolve(JSON.parse(b)); } catch { resolve(null); } });
+      });
+      req.on('error', () => resolve(null));
+      req.on('timeout', () => { try { req.destroy(); } catch {} resolve(null); });
+    } catch { resolve(null); }
+  });
+}
+function downloadWithProgress(url, dest, onPct, hops = 0) {
+  // streams an https: URL (following redirects, GitHub release CDN jumps included) to `dest`
+  return new Promise((resolve) => {
+    if (hops > 5) return resolve(false);
+    try {
+      const u = new URL(url);
+      const lib = u.protocol === 'https:' ? require('https') : require('http');
+      const req = lib.get({
+        hostname: u.hostname, port: u.port || (u.protocol === 'https:' ? 443 : 80), path: u.pathname + u.search,
+        headers: { 'User-Agent': 'GTAMP-Launcher/' + LAUNCHER_VER }
+      }, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          res.resume(); return downloadWithProgress(res.headers.location, dest, onPct, hops + 1).then(resolve);
+        }
+        if (res.statusCode !== 200) { res.resume(); return resolve(false); }
+        const total = parseInt(res.headers['content-length'] || '0', 10) || 0;
+        let got = 0;
+        const fs = require('fs');
+        const w = fs.createWriteStream(dest);
+        res.on('data', (chunk) => {
+          got += chunk.length;
+          if (onPct && total > 0) { try { onPct(got / total, got, total); } catch {} }
+        });
+        res.pipe(w);
+        w.on('finish', () => { w.close(() => resolve(got > 0)); });
+        w.on('error', () => resolve(false));
+      });
+      req.on('error', () => resolve(false));
+    } catch { resolve(false); }
+  });
+}
+async function checkForLauncherUpdate() {
+  // 1) GitHub Releases — canonical source of truth, no dependence on the user's local website
+  try {
+    const j = await httpsJson('https://api.github.com/repos/' + UPDATE_REPO + '/releases/latest', 5000);
+    const tag = j && String(j.tag_name || '').replace(/^v/, '');
+    const asset = j && (j.assets || []).find(a => /\.exe$/i.test(a.name || ''));
+    if (tag && asset && asset.browser_download_url) {
+      return { version: tag, exeUrl: asset.browser_download_url, source: 'github' };
+    }
+  } catch {}
+  // 2) community website fallback
+  try {
+    const site = String(config.websiteUrl || defaultConfig.websiteUrl || '').replace(/\/+$/, '');
+    if (/^https?:/.test(site)) {
+      const j = await new Promise((resolve) => {
+        try {
+          const u = new URL(site + '/api/launcher/version');
+          const lib = u.protocol === 'https:' ? require('https') : require('http');
+          const req = lib.get({ hostname: u.hostname, port: u.port || (u.protocol === 'https:' ? 443 : 80), path: u.pathname, timeout: 3500 }, (res) => {
+            let b = ''; res.on('data', c => b += c);
+            res.on('end', () => { try { resolve(JSON.parse(b)); } catch { resolve(null); } });
+          });
+          req.on('error', () => resolve(null));
+          req.on('timeout', () => { try { req.destroy(); } catch {} resolve(null); });
+        } catch { resolve(null); }
+      });
+      if (j && j.version) return { version: j.version, exeUrl: site + (j.url || ('/download/GTAMP-Launcher-v' + j.version + '.exe')), source: 'website' };
+    }
+  } catch {}
+  return null;
+}
+async function doSelfUpdate(upd, loadingStatus, sleep) {
+  writeLaunchDiag(['self-update available: v' + upd.version + ' from ' + upd.source + ' (' + upd.exeUrl + ')']);
+  if (process.platform !== 'win32' || !app.isPackaged) {
+    writeLaunchDiag(['self-update: skipped (dev build / non-Windows)']);
+    return false;
+  }
+  const path = require('path'), fs = require('fs');
+  loadingStatus('UPDATING GTAMP', 'GTAMP v' + upd.version + ' is available — downloading (FiveM-style auto-update)…', 0);
+  try {
+    const dir = path.dirname(process.execPath);
+    const dest = path.join(dir, 'GTAMP-Launcher-v' + upd.version + '.exe');
+    const tmp = dest + '.download';
+    let lastPct = -1;
+    const ok = await downloadWithProgress(upd.exeUrl, tmp, (pct, got, total) => {
+      const p = Math.round(pct * 100);
+      if (p !== lastPct) {
+        lastPct = p;
+        loadingStatus('UPDATING GTAMP', 'Downloading v' + upd.version + ' — ' + p + '%  (' + (got / 1048576).toFixed(1) + ' / ' + (total / 1048576).toFixed(1) + ' MB)', pct);
+      }
+    });
+    if (!ok) { try { fs.unlinkSync(tmp); } catch {} writeLaunchDiag(['self-update: download failed']); return false; }
+    const st = fs.statSync(tmp);
+    const fd = fs.openSync(tmp, 'r'); const head = Buffer.alloc(2); fs.readSync(fd, head, 0, 2, 0); fs.closeSync(fd);
+    if (st.size < 8 * 1048576 || head.toString('latin1') !== 'MZ') { // sanity: a launcher exe is tens of MB and starts MZ
+      try { fs.unlinkSync(tmp); } catch {}
+      writeLaunchDiag(['self-update: sanity check failed (size=' + st.size + ')']);
+      return false;
+    }
+    try { fs.renameSync(tmp, dest); } catch (e) { writeLaunchDiag(['self-update: rename failed: ' + e.message]); return false; }
+    loadingStatus('UPDATING GTAMP', 'Restarting into GTAMP v' + upd.version + '…', 1);
+    writeLaunchDiag(['self-update: downloaded OK (' + st.size + ' bytes) → relaunching as ' + dest]);
+    await sleep(1400);
+    try {
+      const c = require('child_process').spawn(dest, [], { detached: true, stdio: 'ignore', windowsHide: false });
+      c.unref();
+    } catch (e) { writeLaunchDiag(['self-update: relaunch failed: ' + e.message]); return false; }
+    setTimeout(() => { try { app.exit(0); } catch {} }, 600);
+    return true;
+  } catch (e) {
+    writeLaunchDiag(['self-update: exception: ' + e.message]);
+    return false;
+  }
+}
+
 async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
   const serverName = serverAddr || 'GTAMP Official #1';
   if (connectCtl) { const old = connectCtl; connectCtl = null; try { await old.cancel(true); } catch {} }
@@ -1385,14 +1538,17 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
       injectorOutcome = { ok: false, code: line.slice(6) };
     }
   };
-  writeLaunchDiag(['game process found — native injector takes over (window wait → settle → inject), alreadyRunning=' + reusedGame]);
-  const injRes = runInjector({ waitWindow: true, alreadyRunning: reusedGame, settleMs: Math.max(1000, parseInt(process.env.GTAMP_SETTLE_MS || '6000', 10) || 6000), timeoutMs: 240000 }, onStage);
+  writeLaunchDiag(['game process found — native injector takes over (window wait → settle → inject, blind-safe), alreadyRunning=' + reusedGame]);
+  // v1.9.6 — window wait caps at 120s then the injector blind-injects (a game alive that long is past D3D init);
+  // reused instances skip the gate entirely. GTAMP_WINDOW_MS overrides for stuttery machines.
+  const windowCap = Math.max(30000, parseInt(process.env.GTAMP_WINDOW_MS || '120000', 10) || 120000);
+  const injRes = runInjector({ waitWindow: true, alreadyRunning: reusedGame, settleMs: Math.max(1000, parseInt(process.env.GTAMP_SETTLE_MS || '6000', 10) || 6000), timeoutMs: windowCap }, onStage);
   if (!injRes.ok) { fail(9, 'Injection failed', injRes.error || 'unknown'); return; }
 
   // STEP 8 — wait until the injector reports injected / errored (its own timeout is 240s)
   {
     const t2 = Date.now();
-    while (!injectorOutcome && !ctl.events['hookHello'] && Date.now() - t2 < 245000) {
+    while (!injectorOutcome && !ctl.events['hookHello'] && Date.now() - t2 < Math.min(windowCap + 30000, 300000)) {
       if (ctl.cancelled) return;
       await sleep(400);
     }

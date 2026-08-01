@@ -12,7 +12,7 @@ same stage ordering — never ripped FiveM assets or verbatim code).
 | `Prevent NVIDIA game filters` (citicore) | `PREPARING GAME ENVIRONMENT` step; hook loads nothing until game window exists |
 | `DoPreLaunchTasks()` | Connect-flow steps 3–4: settings.xml repaired (DX 11, HDR off), stale GTA procs killed, ShadowPlay queried, component update check |
 | `NVSP_DisableOnStartup()` + `enable_nvsp` cookie (DisableNVSP.cpp) | `queryNvNode()` → NvNode local HTTP API (`X_LOCAL_SECURITY_COOKIE`) → disable ShadowPlay for the session, restore on quit (`nvspDisabledByUs`) |
-| Updater (`Bootstrap_DoBootstrap`, GameCache verify) | `UPDATING COMPONENTS` step → `GET /api/launcher/version` on our website |
+| Updater (`Bootstrap_DoBootstrap`, GameCache verify) | **v1.9.6: real self-update** — startup step 2 pulls the latest release tag from GitHub Releases, downloads the new exe with a live progress bar, sanity-checks it, spawns it, and exits — the update lands *before the game ever loads*, exactly like `Bootstrap_DoBootstrap` patching before `XBR_EarlySelect`. Website `/api/launcher/version` remains as fallback + the connect-flow "update available" hint |
 | ROS entitlement (`ros:legit` → entitlement block) | `CONNECTING TO ROCKSTAR GAMES SERVICES` — platform (Steam/Epic/RGL) must sign in first, ownership verify (exe + `update.rpf` > 200MB + platform DLLs) |
 | **Game starts inside FiveM's own process** (they map GTA5.exe themselves) | We launch stock GTA5 through its platform, then inject **only after the game window exists** (== D3D init succeeded) + settle grace — the practical equivalent of their contract and the direct ERR_GFX_D3D_INIT fix |
 | Master/process + `initialGamePid` tracking | GTA-exit watcher returns to launcher UI, tray keeps app alive |

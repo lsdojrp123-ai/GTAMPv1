@@ -64,7 +64,7 @@ static bool processAlive(DWORD pid) {
     DWORD c = 0; BOOL ok = GetExitCodeProcess(h, &c); CloseHandle(h);
     return ok && c == STILL_ACTIVE;
 }
-struct WinCtx { DWORD pid; HWND hwnd; wchar_t titles[900]; };
+struct WinCtx { DWORD pid; HWND hwnd; HWND soft; wchar_t titles[900]; };
 static BOOL CALLBACK enumWin(HWND h, LPARAM lp) {
     WinCtx* c = (WinCtx*)lp;
     DWORD p = 0; GetWindowThreadProcessId(h, &p);
@@ -74,13 +74,16 @@ static BOOL CALLBACK enumWin(HWND h, LPARAM lp) {
         wchar_t row[260]; _snwprintf(row, 259, L" [vis=%d len=%d]\"%s\"", IsWindowVisible(h) ? 1 : 0, (int)wcslen(t), t);
         wcscat(c->titles, row);
     }
-    if (!c->hwnd && IsWindowVisible(h) && GetWindowTextLengthW(h) > 0) c->hwnd = h;
+    if (!IsWindowVisible(h)) return TRUE;
+    if (GetWindowTextLengthW(h) > 0) { if (!c->hwnd) c->hwnd = h; }
+    else if (!c->soft) c->soft = h; // v1.9.6 — fullscreen/untitled windows count too (FiveM gates on nothing)
     return TRUE;
 }
-static HWND findWindowForPid(DWORD pid, wchar_t* titlesOut = NULL) {
-    WinCtx c; c.pid = pid; c.hwnd = NULL; c.titles[0] = 0;
+static HWND findWindowForPid(DWORD pid, wchar_t* titlesOut = NULL, HWND* softOut = NULL) {
+    WinCtx c; c.pid = pid; c.hwnd = NULL; c.soft = NULL; c.titles[0] = 0;
     EnumWindows(enumWin, (LPARAM)&c);
     if (titlesOut) { wcsncpy(titlesOut, c.titles, 899); titlesOut[899] = 0; }
+    if (softOut) *softOut = c.soft;
     return c.hwnd;
 }
 
@@ -106,7 +109,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, wchar_t* cmd, int) {
         }
         LocalFree(argv);
     }
-    dbg(L"GTAMP injector 1.9.5 pid=%lu dlloverride=%d waitpid=%d waitwindow=%d alreadyrunning=%d settle=%lums timeout=%lums dll=[%s]",
+    dbg(L"GTAMP injector 1.9.6 pid=%lu dlloverride=%d waitpid=%d waitwindow=%d alreadyrunning=%d settle=%lums timeout=%lums dll=[%s]",
         pid, dlloverride ? 1 : 0, waitPid ? 1 : 0, waitWindow ? 1 : 0, alreadyRunning ? 1 : 0, settleMs, waitMs, dll);
     if (!dll[0]) { stage(L"error:no-dll"); return 2; }
 
@@ -125,12 +128,15 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, wchar_t* cmd, int) {
     // 2) window wait (FiveM-parity settled-D3D gate) — skipped for reused instances
     bool windowOk = false;
     if (waitWindow && !alreadyRunning) {
-        ULONGLONG deadline = GetTickCount64() + waitMs;
+        ULONGLONG wstart = GetTickCount64();
+        ULONGLONG deadline = wstart + waitMs;
         wchar_t title[260] = { 0 };
         int tick = 0;
         for (;;) {
             if (!processAlive(pid)) { stage(L"error:process-exited pid=%lu", pid); return 3; }
-            wchar_t titles[900]; HWND w = findWindowForPid(pid, titles);
+            wchar_t titles[900]; HWND soft = NULL;
+            HWND w = findWindowForPid(pid, titles, &soft);
+            if (!w && soft && GetTickCount64() - wstart >= 30000) w = soft; // 30s in: an untitled visible window is good enough
             if (w) {
                 GetWindowTextW(w, title, 259);
                 stage(L"stage:window-found pid=%lu title=\"%s\"", pid, title);
