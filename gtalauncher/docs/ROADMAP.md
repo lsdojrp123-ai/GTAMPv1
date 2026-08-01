@@ -41,6 +41,15 @@
 - **T chat** in-game (FiveM keybinding); F9 toggles the debug HUD.
 - **Tray/background**: GTAMP keeps running in the tray while you play; quitting GTA returns you to the launcher; `disconnectSession` cleans the session from console/launcher.
 
+## v2.2.1 — the stale in-game hook and the SHV fallback are dead
+Field report at v2.2.0: the same SHV FATAL dialog resurfaced. Root cause: **Windows never reloads a same-path DLL inside a still-running GTA** — the old v2.1.x hook stayed resident in the user's GTA process, so re-injecting did nothing and the old fiber kept dying on their ScriptHookV.
+- **Versioned hook staging**: the launcher now copies `gtamp_hook.dll` to `%TEMP%\gtamp-native\v<ver>\` before injection, so a new build can physically enter an already-hooked GTA.
+- **In-game singleton guard** (`Global\GTAMP_HOOK_SINGLE` named mutex): whichever hook owns the process keeps it; a second loader unloads itself instead of double-running.
+- **hookMismatch card**: the launcher compares the hook's `hookHello` version to its own. On mismatch: *"GTA is running an old GTAMP (vX)"* with a one-click **Close GTA & Retry** (taskkills GTA5.exe/GTA5_Enhanced.exe then reruns the whole flow). The stale-hook death loop is now loud, explained, and self-fixing — the same take-over discipline FiveM applies to zombie bootstrap instances.
+- **ScriptHookV invoke path removed entirely.** Calling SHV's `nativeInit` on a build-mismatched SHV is precisely what raised `FATAL: Can't find native` and killed our fiber. SHV is now ONLY the fiber scheduler (`scriptRegister`/`scriptWait`); natives are exclusively GTAMP's own engine. The dialog is no longer producible by GTAMP.
+- **noInv card** replaces the SHV fallback: if the own engine can't map the GTA build (Rockstar moved the table layout), the hook fiber stays alive, touches nothing, and the card asks for clipboard diagnostics — graceful degradation instead of a fatal.
+- `nativeScan`/`noInv` telemetry now carries the exact GTA build string.
+
 ## v2.2.0 — GTAMP resolves GTA natives ITSELF (FiveM rage-scripting-five behavior port)
 - **The error class that blocked the user at v2.1.1 is deleted.** `FATAL: Can't find native` existed because we routed every native through the *user's* ScriptHookV.dll, whose embedded database must match the game build. FiveM doesn't have this problem because it resolves natives itself — now so do we.
 - **Own native engine** (`src/native/hook/own_invoker.h`): pattern-scan the game's 256-bucket registration table, de-obfuscate R*'s XOR-folded entries, resolve handlers, invoke with a rage-faithful call context. Behavior documented row-by-row in [FIVEM-PARITY.md](./FIVEM-PARITY.md) §5.

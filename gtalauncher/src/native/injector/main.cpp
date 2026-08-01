@@ -152,7 +152,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, wchar_t* cmd, int) {
         }
         LocalFree(argv);
     }
-    dbg(L"GTAMP injector 2.2.0 pid=%lu dlloverride=%d waitpid=%d waitwindow=%d alreadyrunning=%d settle=%lums timeout=%lums dll=[%s]",
+    dbg(L"GTAMP injector 2.2.1 pid=%lu dlloverride=%d waitpid=%d waitwindow=%d alreadyrunning=%d settle=%lums timeout=%lums dll=[%s]",
         pid, dlloverride ? 1 : 0, waitPid ? 1 : 0, waitWindow ? 1 : 0, alreadyRunning ? 1 : 0, settleMs, waitMs, dll);
 
     // --probe: instant process check, no injection and no --dll required (v1.9.8 native gtaRunning)

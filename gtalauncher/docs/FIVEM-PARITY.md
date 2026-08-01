@@ -65,10 +65,10 @@ build. GTAMP v2.2.0 ports the *behavior* of FiveM's native resolution into
 | `scrThread.h` — `rage::scrNativeCallContext` layout (return/args buffers, 8-byte slots, vector staging space, `SetVectorResults` copy-out) | Byte-identical context layout; one shared 256-byte temp buffer for args+return (FiveM's own note: the game handles the aliasing); vector results land 1 float per 8-byte slot exactly like the ScriptHookV `ret3f` pattern our fiber already used |
 | `scrEngine::GetNativeHandler` + fast-path cache | Per-hash cache (128 entries) + miss logging to `%TEMP%\gtamp_hook.log` |
 
-**Fallback contract (unchanged):** ScriptHookV remains the fiber scheduler. If the own
-scan ever fails (pattern gone on an exotic build), the hook permanently falls back to the
-SHV export path — exactly the v2.1.1 behavior, watchdog and update-SHV card included.
-New bridge telemetry: `nativeScan` (own engine active, N natives) / `noShv` (SHV.dll
-absent after 60 s → install card) / `fiberFail` (fiber froze with own engine active →
-real-stall card). This kills the entire error class the user hit at v2.1.1 — a stale or
-forked ScriptHookV database can no longer stop the multiplayer engine.
+**Fallback contract (v2.2.1):** ScriptHookV remains only the fiber scheduler — the SHV
+native-invoke fallback was REMOVED (calling SHV's `nativeInit` on a mismatched SHV is what
+produced `FATAL: Can't find native` and killed the fiber). If the own scan can't map the
+build, the fiber stays resident, natives no-op, and the launcher shows the `noInv` card
+(graceful, diagnosable) instead of gambling on a fatal path. Stale in-game hooks are handled
+by versioned DLL staging + an in-game singleton mutex + the launcher's `hookMismatch` card
+with one-click **Close GTA & Retry**.

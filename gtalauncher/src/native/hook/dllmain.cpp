@@ -1,4 +1,4 @@
-/* GTAMP Hook v2.2.0 - resolves GTA natives ITSELF (FiveM rage-scripting-five behavior port, own_invoker.h):
+/* GTAMP Hook v2.2.1 - resolves GTA natives ITSELF (FiveM rage-scripting-five behavior port, own_invoker.h):
  * stale ScriptHookV native databases can no longer stop multiplayer with "FATAL: Can't find native". */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -18,7 +18,7 @@
 #pragma comment(lib,"version.lib")
 #pragma comment(lib,"winmm.lib")
 
-#define HOOK_VER "2.2.0"
+#define HOOK_VER "2.2.1"
 #define OVERLAY_KEY RGB(255,0,255)
 #define OV_CLASS "GTAMP_OV160"
 static volatile bool g_running=true;
@@ -728,10 +728,10 @@ static void __cdecl shvScriptMain(){
      for(int i=0;i<40 && own::state()==0 && g_running;i++){ own::init(g_base,(uint32_t)g_size); if(own::state()==0) wait(1000); }
      if(own::active()){
          if(!announced){announced=true;logf("owninv: ACTIVE — %d natives in table; ScriptHookV is now only the fiber scheduler",own::natives());
-             sendJson("{\"t\":\"nativeScan\",\"own\":1,\"natives\":%d}",own::natives());}
+             sendJson("{\"t\":\"nativeScan\",\"own\":1,\"natives\":%d,\"gta\":\"%s\"}",own::natives(),g_ver[0]?g_ver:"?");}
      } else {
-         own::fail();logf("owninv: UNAVAILABLE after retries — using ScriptHookV native path (update ScriptHookV if it cannot resolve natives)");
-         sendJson("{\"t\":\"nativeScan\",\"own\":0}");
+         own::fail();logf("owninv: UNAVAILABLE after retries — NO native engine (SHV invoked-path removed in v2.2.1; the fiber stays alive, natives no-op)");
+         sendJson("{\"t\":\"noInv\",\"gta\":\"%s\"}",g_ver[0]?g_ver:"?");
      }}
     while(g_running){wait(0);DWORD now=timeGetTime();
         if(!g_localPed){static DWORD lt=0;if(now-lt>500){lt=now;pidx=Invoker(H_PLAYER_ID).reti();int p=Invoker(H_PPID).reti();if(p&&timeGetTime()-t0>8000){g_localPed=p;g_shvReady=true;logf("SHV READY: playerIdx=%d ped=0x%X (uptime=%ums) netPeds=%d",pidx,p,(unsigned)(timeGetTime()-t0),g_netPedCount);strcpy_s(g_f.err,"Scanning mem for ped...");sendJson("{\"t\":\"ready\",\"ped\":%d,\"uptime\":%lu}",p,(unsigned long)(timeGetTime()-t0));if(g_gta&&IsWindow(g_gta)){SetForegroundWindow(g_gta);logf("brought GTA window to front");}}else{static DWORD ll=0;if(now-ll>3000){ll=now;logf("SHV: waiting for ped... t=%ums p=%d",(unsigned)(timeGetTime()-t0),p);}}}continue;}
@@ -1257,5 +1257,5 @@ static VOID WINAPI delayedShvLoad(PVOID){
     {HMODULE pe[2048];DWORD need=0;if(EnumProcessModules(GetCurrentProcess(),(HMODULE*)pe,sizeof(pe),&need)){DWORD n=need/sizeof(HMODULE);for(DWORD i=0;i<n&&i<512;i++){char nme[MAX_PATH]={0};if(GetModuleFileNameA(pe[i],nme,MAX_PATH)){const char*b=strrchr(nme,'\\');b=b?b+1:nme;if(strstr(b,"ScriptHook")||!_stricmp(b,"dinput8.dll")||!_stricmp(b,"ScriptHookV.dll")){logf("  module[%u]: %s @ %p",i,nme,(void*)pe[i]); if(strstr(b,"ScriptHook")&&!g_shvFileInfo[0])readShvFileInfo(nme);}}}}}for(int i=0;i<120&&g_running;i++){if(shv::load()){logf("ScriptHookV exports resolved OK");shv::registerScript(shvScriptMain);logf("scriptRegister called (fn=%p)",(void*)shvScriptMain);return;}if(i==0)logf("SHV not found initially (err=%u). Will retry.",(unsigned)GetLastError());Sleep(500);}logf("ScriptHookV not loadable after 60s.");sendJson("{\"t\":\"noShv\"}");
 }
 BOOL APIENTRY DllMain(HMODULE m,DWORD r,LPVOID){if(r==DLL_PROCESS_ATTACH){DisableThreadLibraryCalls(m);
-    InitializeCriticalSection(&g_qCs);InitializeCriticalSection(&g_npCs);InitializeCriticalSection(&g_sendCs);InitializeCriticalSection(&g_conCs);g_pid=GetCurrentProcessId();char t[MAX_PATH];GetTempPathA(MAX_PATH,t);strcat_s(t,MAX_PATH,"gtamp_hook.log");fclose(fopen(t,"w"));logf("==== GTAMP hook v%s PID=%u ====",HOOK_VER,(unsigned)g_pid);HMODULE hm=GetModuleHandleA("GTA5.exe");if(!hm){logf("ERROR: GTA5.exe not found");return TRUE;}detectBuild(hm);shv::setLogger([](const char*s){logf("%s",s);});shv::setSelfHinst(m);own::setLogger([](const char*s){logf("%s",s);});CloseHandle(CreateThread(NULL,0,(LPTHREAD_START_ROUTINE)delayedShvLoad,NULL,0,NULL));g_ovT=CreateThread(NULL,0,overlayThread,NULL,0,NULL);g_netT=CreateThread(NULL,0,netThread,NULL,0,NULL);}else if(r==DLL_PROCESS_DETACH){g_running=false;if(g_ovT){WaitForSingleObject(g_ovT,3000);CloseHandle(g_ovT);}if(g_netT){WaitForSingleObject(g_netT,3000);CloseHandle(g_netT);}DeleteCriticalSection(&g_qCs);DeleteCriticalSection(&g_npCs);DeleteCriticalSection(&g_sendCs);DeleteCriticalSection(&g_conCs);logf("unloaded");}return TRUE;}
+    InitializeCriticalSection(&g_qCs);InitializeCriticalSection(&g_npCs);InitializeCriticalSection(&g_sendCs);InitializeCriticalSection(&g_conCs);g_pid=GetCurrentProcessId();char t[MAX_PATH];GetTempPathA(MAX_PATH,t);strcat_s(t,MAX_PATH,"gtamp_hook.log");fclose(fopen(t,"w"));logf("==== GTAMP hook v%s PID=%u ====",HOOK_VER,(unsigned)g_pid);{HANDLE h=CreateMutexA(NULL,TRUE,"Global\\GTAMP_HOOK_SINGLE");if(h&&GetLastError()==ERROR_ALREADY_EXISTS){logf("another GTAMP hook already lives in this GTA — refusing to dual-load (close GTA to retire the old hook)");return FALSE;}}HMODULE hm=GetModuleHandleA("GTA5.exe");if(!hm){logf("ERROR: GTA5.exe not found");return TRUE;}detectBuild(hm);shv::setLogger([](const char*s){logf("%s",s);});shv::setSelfHinst(m);own::setLogger([](const char*s){logf("%s",s);});CloseHandle(CreateThread(NULL,0,(LPTHREAD_START_ROUTINE)delayedShvLoad,NULL,0,NULL));g_ovT=CreateThread(NULL,0,overlayThread,NULL,0,NULL);g_netT=CreateThread(NULL,0,netThread,NULL,0,NULL);}else if(r==DLL_PROCESS_DETACH){g_running=false;if(g_ovT){WaitForSingleObject(g_ovT,3000);CloseHandle(g_ovT);}if(g_netT){WaitForSingleObject(g_netT,3000);CloseHandle(g_netT);}DeleteCriticalSection(&g_qCs);DeleteCriticalSection(&g_npCs);DeleteCriticalSection(&g_sendCs);DeleteCriticalSection(&g_conCs);logf("unloaded");}return TRUE;}
 extern "C" __declspec(dllexport) const char* gtamp_version(){return "GTAMP Hook v" HOOK_VER;}

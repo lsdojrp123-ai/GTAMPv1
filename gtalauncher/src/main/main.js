@@ -385,7 +385,10 @@ function ensureHookTcpServer() {
           let m; try { m = JSON.parse(l); } catch { continue; }
           if (m.t === 'hookHello') {
             writeLaunchDiag(['hookHello v=' + (m.v || '?') + ' gta=' + (m.gta || '?')]);
-            if (connectCtl) connectCtl.event('hookHello', m.v || '?');
+            if (m.v && m.v !== LAUNCHER_VER) {
+              // v2.2.1 — stale in-game hook (GTA kept running from an older session).
+              if (connectCtl) { connectCtl.hookVerMismatch = m.v; connectCtl.event('hookMismatch'); }
+            } else if (connectCtl) connectCtl.event('hookHello', m.v || '?');
           } else if (m.t === 'shvFail') {
             writeLaunchDiag(['HOOK SHV FAILURE — ScriptHookV cannot resolve natives on this GTA build. shv=[' + (m.shv || '?') + ']']);
             if (connectCtl) { connectCtl.shvFail = String(m.shv || ''); connectCtl.event('shvFail'); }
@@ -395,11 +398,15 @@ function ensureHookTcpServer() {
             if (connectCtl) connectCtl.event('fiberFail');
           } else if (m.t === 'nativeScan') {
             // v2.2.0 — GTAMP lit up its own FiveM-style native resolution
-            writeLaunchDiag([m.own ? ('OWN NATIVE ENGINE ACTIVE — ' + (m.natives || 0) + ' natives resolved without ScriptHookV\'s database') : 'own-native scan failed — using ScriptHookV native path']);
+            writeLaunchDiag([m.own ? ('OWN NATIVE ENGINE ACTIVE — ' + (m.natives || 0) + ' natives on GTA ' + (m.gta || '?') + ', no ScriptHookV database') : 'own-native scan FAILED on GTA ' + (m.gta || '?') + ' — no native engine at all (v2.2.1)']);
             if (connectCtl) connectCtl.event('nativeScan', m.own ? 'own' : 'shv');
           } else if (m.t === 'noShv') {
             writeLaunchDiag(['HOOK: ScriptHookV.dll not found in GTA after 60s']);
             if (connectCtl) connectCtl.event('noShv');
+          } else if (m.t === 'noInv') {
+            // v2.2.1 — own engine could not map this build; hook fiber alive, natives no-op
+            writeLaunchDiag(['HOOK: no native engine — GTA build ' + (m.gta || '?') + ' not mappable (needs a GTAMP update)']);
+            if (connectCtl) { connectCtl.noInvGta = String(m.gta || '?'); connectCtl.event('noInv'); }
           } else if (m.t === 'ready') {
             writeLaunchDiag(['hook SHV ready ped=' + m.ped]);
             if (connectCtl) connectCtl.event('hookReady');
@@ -833,7 +840,7 @@ function verifyGtaOwnership(dir) {
 }
 
 // ---------- Loading window: startup splash + server connect (v1.7.0) ----------
-const LAUNCHER_VER = '2.2.0';
+const LAUNCHER_VER = '2.2.1';
 function openLoading(mode, opts = {}) {
   closeLoading();
   loadingWin = new BrowserWindow({
@@ -1093,7 +1100,7 @@ async function pickGtaFolderDialog() {
 // Actions from loading.html buttons (startup errors + connect cancel)
 ipcMain.on('loading:action', (_e, act) => {
   const id = typeof act === 'string' ? act : (act && act.id);
-  if (connectCtl && ['cancel', 'retry', 'retryInject', 'pickFolder', 'quit', 'relaunchAdmin', 'forceInject', 'updateShv'].includes(id)) {
+  if (connectCtl && ['cancel', 'retry', 'retryInject', 'pickFolder', 'quit', 'relaunchAdmin', 'forceInject', 'updateShv', 'closeGta'].includes(id)) {
     (async () => {
       if (id === 'cancel') return connectCtl.cancel();
       if (id === 'quit') return app.quit();
@@ -1104,6 +1111,13 @@ ipcMain.on('loading:action', (_e, act) => {
         const p = await pickGtaFolderDialog();
         if (p) { config.gtaPath = p; saveConfig(config); connectCtl.retry(); }
         return;
+      }
+      if (id === 'closeGta') {
+        // v2.2.1 — retire the stale in-game hook the hard-but-polite way, then rerun everything
+        try { require('child_process').execSync('taskkill /F /IM GTA5.exe /T 2>nul & taskkill /F /IM GTA5_Enhanced.exe /T 2>nul', { stdio: 'ignore' }); } catch {}
+        writeLaunchDiag(['closeGta: taskkill issued for GTA5.exe / GTA5_Enhanced.exe']);
+        await new Promise(r => setTimeout(r, 2500));
+        return connectCtl.retry();
       }
       connectCtl.retry(); // 'retry' / 'retryInject' both restart the connect flow
     })();
@@ -1507,12 +1521,28 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
     'GTAMP injected into GTA but never found ScriptHookV.dll within 60 seconds. ScriptHookV is only needed as the in-game fiber scheduler (GTAMP resolves game functions itself now), but the game cannot run GTAMP\'s logic without it.' +
     '\n\nOne-minute fix:\n1) Press OPEN SCRIPTHOOK DOWNLOAD (official dev-c.com page).\n2) From the ZIP, copy ScriptHookV.dll AND dinput8.dll into your GTA V folder (same folder as GTA5.exe).\n3) Close GTA completely, then press Retry Inject.',
     [{ id: 'updateShv', label: 'Open ScriptHookV download' }, { id: 'retryInject', label: 'Retry Inject' }, { id: 'cancel', label: 'Cancel' }]);
+  // v2.2.1 — GTA still has an OLD GTAMP hook inside from a previous session. Windows never
+  // reloads a same-path DLL in a running process, and our singleton guard refuses dual-load —
+  // the ONLY cure is fully closing GTA. Offer to do it for the user.
+  const oldHookCard = () => fail(9, 'GTA is running an old GTAMP (v' + (ctl.hookVerMismatch || '?') + ')',
+    'GTAMP v' + LAUNCHER_VER + ' just found GTA still running with GTAMP v' + (ctl.hookVerMismatch || '?') + ' inside. GTA keeps injected code until it FULLY closes — no injection can replace it while the game stays open. That old hook is what showed the ScriptHookV error dialog.' +
+    '\n\nOne-click fix:\n1) Press CLOSE GTA & RETRY below — GTAMP closes GTA completely and restarts the whole connect flow with the new engine.\n2) If GTA is frozen, allow the close (Task Manager steps appear otherwise).' +
+    '\n\nAfter this, the new hook resolves game functions itself and the ScriptHookV error is gone.',
+    [{ id: 'closeGta', label: 'Close GTA & Retry' }, { id: 'cancel', label: 'Cancel' }]);
+  // v2.2.1 — own engine could not map this GTA build (exotic/new build). Nothing risky is tried anymore.
+  const noInvCard = () => fail(9, 'This GTA build needs a new GTAMP engine',
+    'GTAMP injected fine, but its own native engine could not map GTA build ' + (ctl.noInvGta || '?') + ' (Rockstar moved the native table layout). The hook stays resident but touches nothing, so the game is safe.' +
+    '\n\nThis is exactly what the clipboard diagnostics are for: press Retry Inject once (in case of a fluke), and if this card returns, paste the clipboard to GTAMP support — send these and an engine update ships for your build.',
+    [{ id: 'retryInject', label: 'Retry Inject' }, { id: 'cancel', label: 'Cancel' }]);
   const hookFailEvt = (ms) => Promise.race([
     ctl.waitFor('shvFail', ms).then(() => 'shvFail'),
     ctl.waitFor('fiberFail', ms).then(() => 'fiberFail'),
-    ctl.waitFor('noShv', ms).then(() => 'noShv')
+    ctl.waitFor('noShv', ms).then(() => 'noShv'),
+    ctl.waitFor('noInv', ms).then(() => 'noInv'),
+    ctl.waitFor('hookMismatch', ms).then(() => 'hookMismatch')
   ]);
-  const hookFailCard = (kind) => kind === 'noShv' ? noShvCard() : kind === 'fiberFail' ? fiberFailCard() : shvFailCard();
+  const hookFailCard = (kind) => kind === 'noShv' ? noShvCard() : kind === 'fiberFail' ? fiberFailCard() :
+    kind === 'noInv' ? noInvCard() : kind === 'hookMismatch' ? oldHookCard() : shvFailCard();
   const fail = (i, title, detail, actions) => {
     setStep(i, 'failed');
     const diagText = 'GTAMP v' + LAUNCHER_VER + ' — connect failure: ' + title + '\n' + (detail || '') +
@@ -1845,7 +1875,7 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
   const helloOk = await Promise.race([ctl.waitFor('hookHello', 90000), hookFailEvt(90000)]);
   if (ctl.cancelled) return;
   {
-    const hk = ['shvFail','fiberFail','noShv'].find(k => ctl.events[k]);
+    const hk = ['shvFail','fiberFail','noShv','noInv','hookMismatch'].find(k => ctl.events[k]);
     if (hk) { hookFailCard(hk); return; }
   }
   if (helloOk !== true) {
@@ -1863,7 +1893,7 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
   const welcomeOk = await Promise.race([ctl.waitFor('welcome', 15000), hookFailEvt(15000)]);
   if (ctl.cancelled) return;
   {
-    const hk = ['shvFail','fiberFail','noShv'].find(k => ctl.events[k]);
+    const hk = ['shvFail','fiberFail','noShv','noInv','hookMismatch'].find(k => ctl.events[k]);
     if (hk) { hookFailCard(hk); return; }
   }
   setStep(11, 'done', welcomeOk ? 'connected' : 'server unreachable — continuing offline');
@@ -1874,7 +1904,7 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
   await Promise.race([ctl.waitFor('spawn', 15000), hookFailEvt(15000)]);
   if (ctl.cancelled) return;
   {
-    const hk = ['shvFail','fiberFail','noShv'].find(k => ctl.events[k]);
+    const hk = ['shvFail','fiberFail','noShv','noInv','hookMismatch'].find(k => ctl.events[k]);
     if (hk) { hookFailCard(hk); return; }
   }
   setStep(12, 'done');
@@ -2197,8 +2227,21 @@ function runInjector(opts, onStage) {
   // v1.9.3 — the INJECTOR natively waits for process → window → settle → inject and streams
   // `stage:`/`error:` lines on stdout. No more PowerShell-per-2s polling (WerFault 0xc000012d).
   opts = opts || {};
-  const dllPath = findNativeFile('gtamp_hook.dll');
   const injPath = findNativeFile('gtamp_injector.exe');
+  // v2.2.1 — stage the hook under a VERSIONED path. Windows never reloads a same-path DLL
+  // inside a still-running GTA, so a new hook must come from a new path to enter an
+  // already-hooked process at all; the hook's own singleton mutex then makes the OLD hook
+  // keep sole ownership and the launcher names the situation (hookMismatch card).
+  let dllPath = findNativeFile('gtamp_hook.dll');
+  if (dllPath) {
+    try {
+      const stageDir = path.join(process.env.TEMP || require('os').tmpdir(), 'gtamp-native', 'v' + LAUNCHER_VER);
+      fs.mkdirSync(stageDir, { recursive: true });
+      const staged = path.join(stageDir, 'gtamp_hook.dll');
+      fs.copyFileSync(dllPath, staged);
+      dllPath = staged;
+    } catch (e) { console.log('[Main] hook staging failed, using source path:', e.message); }
+  }
   if (!dllPath || !injPath) {
     const msg = 'Injector/DLL NOT FOUND (looked in: ' + nativeDirs().join(', ') + ')';
     console.log('[Main]', msg);
@@ -2228,7 +2271,7 @@ function runInjector(opts, onStage) {
         const lines = buf.split(/\r?\n/);
         buf = lines.pop();
         for (const raw of lines) {
-          const l = raw.replace(/^ /, '').replace(/[^\x20-\x7E]/g, '').trim();
+          const l = raw.replace(/^\x00/, '').replace(/[^\x20-\x7E]/g, '').trim();
           if (!l) continue;
           writeLaunchDiag(['injector: ' + l]);
           try { onStage(l); } catch {}
