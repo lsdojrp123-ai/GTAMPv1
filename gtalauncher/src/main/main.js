@@ -819,7 +819,7 @@ function verifyGtaOwnership(dir) {
 }
 
 // ---------- Loading window: startup splash + server connect (v1.7.0) ----------
-const LAUNCHER_VER = '1.9.3';
+const LAUNCHER_VER = '1.9.4';
 function openLoading(mode, opts = {}) {
   closeLoading();
   loadingWin = new BrowserWindow({
@@ -1372,15 +1372,8 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
     } else if (line === 'stage:injected') {
       injectorOutcome = { ok: true };
       ctl.event('injected');
-    } else if (line === 'error:process-exited') {
-      injectorOutcome = { ok: false, code: 'process-exited' };
-      ctl.event('injectDone');
-    } else if (line === 'error:window-timeout') {
-      injectorOutcome = { ok: false, code: 'window-timeout' };
-      ctl.event('injectDone');
-    } else if (line === 'error:inject-failed') {
-      injectorOutcome = { ok: false, code: 'inject-failed' };
-      ctl.event('injectDone');
+    } else if (line.startsWith('error:')) {
+      injectorOutcome = { ok: false, code: line.slice(6) };
     }
   };
   writeLaunchDiag(['game process found — native injector takes over (window wait → settle → inject)']);
@@ -1390,10 +1383,12 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
   // STEP 8 — wait until the injector reports injected / errored (its own timeout is 240s)
   {
     const t2 = Date.now();
-    while (!injectorOutcome && Date.now() - t2 < 245000) {
+    while (!injectorOutcome && !ctl.events['hookHello'] && Date.now() - t2 < 245000) {
       if (ctl.cancelled) return;
       await sleep(400);
     }
+    // v1.9.4 — if the HOOK reported in, the DLL is in no matter what stdout said
+    if (!injectorOutcome && ctl.events['hookHello']) injectorOutcome = { ok: true, via: 'hookHello' };
   }
   if (ctl.cancelled) return;
   if (!injectorOutcome || !injectorOutcome.ok) {
@@ -1759,6 +1754,10 @@ function runInjector(opts, onStage) {
       injectorProc.unref();
     }
     injectorProc.on('error', e => writeLaunchDiag(['injector process error: ' + e.message]));
+    // v1.9.4 — never let stdout parsing be the only signal: injector EXITING is also an outcome.
+    injectorProc.on('exit', (code) => {
+      try { if (onStage) onStage(code === 0 ? 'stage:injected' : 'error:inject-failed exit=' + code); } catch {}
+    });
     writeLaunchDiag(['spawning injector (attempt ' + injectAttempt + ', waitWindow=' + !!opts.waitWindow + ')', injPath, dllPath]);
     return { ok:true, injector: injPath, dll: dllPath, attempt: injectAttempt };
   } catch (e) {
