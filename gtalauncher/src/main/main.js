@@ -819,7 +819,7 @@ function verifyGtaOwnership(dir) {
 }
 
 // ---------- Loading window: startup splash + server connect (v1.7.0) ----------
-const LAUNCHER_VER = '1.9.7';
+const LAUNCHER_VER = '1.9.8';
 function openLoading(mode, opts = {}) {
   closeLoading();
   loadingWin = new BrowserWindow({
@@ -875,6 +875,17 @@ function ensureTray() {
 // ---------- GTA5.exe presence + exit watcher ----------
 function gtaRunning() {
   if (process.platform !== 'win32') return false;
+  // v1.9.8 — native probe FIRST (no cmd/tasklist spawn; shell spawns can fail silently under
+  // memory pressure on this machine and blind us to a running game). Injector does a direct
+  // Toolhelp32 snapshot: `gtamp_injector.exe --process GTA5.exe --probe` → exit 0 = running.
+  try {
+    const inj = findNativeFile('gtamp_injector.exe');
+    if (inj) {
+      const r = require('child_process').spawnSync(inj, ['--process', 'GTA5.exe', '--probe'], { windowsHide: true, timeout: 8000 });
+      if (!r.error) return r.status === 0;
+    }
+  } catch {}
+  // fallback: tasklist
   try {
     const out = require('child_process').execSync(
       'tasklist /FI "IMAGENAME eq GTA5.exe" /NH & tasklist /FI "IMAGENAME eq GTA5_Enhanced.exe" /NH',
@@ -1488,35 +1499,25 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
   setStep(6, 'done');
   }
 
-  // STEP 7 — wait for the game process, THEN a real window (= D3D init succeeded)
+  // STEP 7..9 — ONE native injector call owns the whole chain (v1.9.8):
+  // process wait (--wait-pid --pid-timeout) → window wait (--wait-window) → settle → inject.
+  // Previous versions polled `tasklist` from JS every 2s (up to ~150s of shell spawns) — under
+  // memory pressure those spawns throw or time out, making GTA5.exe "invisible" and wedging the
+  // card at "waiting for game window" even with the game open. The injector waits natively
+  // (Toolhelp32 snapshot, zero shell) and streams stage lines; we just render them.
   setStep(7, 'active', 'The game can take a minute to appear…');
-  const waitMs = (launch.injectWaitMs || 90000) + 60000;
+  const pidWaitMs = (launch.injectWaitMs || 90000) + 60000;
+  const windowCap = Math.max(30000, parseInt(process.env.GTAMP_WINDOW_MS || '120000', 10) || 120000);
   const t0 = Date.now();
-  let found = false;
-  while (Date.now() - t0 < waitMs) {
-    if (ctl.cancelled) return;
-    found = gtaRunning();
-    if (found) break;
-    const left = Math.ceil((waitMs - (Date.now() - t0)) / 1000);
-    loadingStatus('WAITING FOR GAME WINDOW', 'Game process — up to ' + left + 's remaining');
-    await sleep(2000);
-  }
-  if (ctl.cancelled) return;
-  if (!found) {
-    fail(7, 'GTA5.exe never appeared',
-      'The game did not start. Retry, or start GTA V yourself and press Retry Inject.',
-      [{ id: 'retryInject', label: 'Retry Inject' }, { id: 'cancel', label: 'Cancel' }]);
-    return;
-  }
-  // STEP 7..9 — the INJECTOR natively waits window → settle → inject and streams stage lines
-  // (v1.9.3: replaces the PowerShell-polling storm that spiked commit memory / WerFault 0xc000012d)
-  setStep(7, 'active', 'Waiting for the game window (graphics init)…');
   let injectorOutcome = null;
   let stage8Armed = false;
+  let procLineShown = false;
+  let lastUiTick = 0;
   const onStage = (line) => {
     if (line.startsWith('stage:process-found')) {
       const m = line.match(/pid=(\d+)/);
       setStep(7, 'active', 'Game process found' + (m ? ' (pid ' + m[1] + ')' : '') + ' — waiting for the game window…');
+      procLineShown = true;
     } else if (line.startsWith('stage:window-found')) {
       ctl.event('windowFound');
       setStep(7, 'done', 'game window up (D3D ready)');
@@ -1538,18 +1539,22 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
       injectorOutcome = { ok: false, code: line.slice(6) };
     }
   };
-  writeLaunchDiag(['game process found — native injector takes over (window wait → settle → inject, blind-safe), alreadyRunning=' + reusedGame]);
-  // v1.9.6 — window wait caps at 120s then the injector blind-injects (a game alive that long is past D3D init);
-  // reused instances skip the gate entirely. GTAMP_WINDOW_MS overrides for stuttery machines.
-  const windowCap = Math.max(30000, parseInt(process.env.GTAMP_WINDOW_MS || '120000', 10) || 120000);
-  const injRes = runInjector({ waitWindow: true, alreadyRunning: reusedGame, settleMs: Math.max(1000, parseInt(process.env.GTAMP_SETTLE_MS || '6000', 10) || 6000), timeoutMs: windowCap }, onStage);
+  writeLaunchDiag(['native injector owns process+window wait (waitPid, blind-safe), alreadyRunning=' + reusedGame + ', pidWaitMs=' + pidWaitMs + ', windowCap=' + windowCap]);
+  const injRes = runInjector({ waitPid: true, pidTimeoutMs: pidWaitMs, waitWindow: true, alreadyRunning: reusedGame, settleMs: Math.max(1000, parseInt(process.env.GTAMP_SETTLE_MS || '6000', 10) || 6000), timeoutMs: windowCap }, onStage);
   if (!injRes.ok) { fail(9, 'Injection failed', injRes.error || 'unknown'); return; }
 
-  // STEP 8 — wait until the injector reports injected / errored (its own timeout is 240s)
+  // STEP 8 — wait until the injector reports injected / errored. Budget covers the injector's
+  // own process wait + window cap + settle with headroom; hookHello shortcuts success.
   {
     const t2 = Date.now();
-    while (!injectorOutcome && !ctl.events['hookHello'] && Date.now() - t2 < Math.min(windowCap + 30000, 300000)) {
+    const outcomeBudget = (reusedGame ? windowCap : pidWaitMs + windowCap) + 60000;
+    while (!injectorOutcome && !ctl.events['hookHello'] && Date.now() - t2 < outcomeBudget) {
       if (ctl.cancelled) return;
+      if (!procLineShown && Date.now() - lastUiTick >= 2000) { // pure-timer countdown, no shell
+        lastUiTick = Date.now();
+        const left = Math.max(0, Math.ceil((pidWaitMs - (Date.now() - t0)) / 1000));
+        loadingStatus('WAITING FOR GAME WINDOW', 'Game process — up to ' + left + 's remaining');
+      }
       await sleep(400);
     }
     // v1.9.4 — if the HOOK reported in, the DLL is in no matter what stdout said
@@ -1558,6 +1563,12 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
   if (ctl.cancelled) return;
   if (!injectorOutcome || !injectorOutcome.ok) {
     const code = injectorOutcome && injectorOutcome.code;
+    if (code && code.indexOf('process-timeout') === 0) {
+      fail(7, 'GTA5.exe never appeared',
+        'The game process never showed up. GTA V may still be loading — check Rockstar/Steam for a started game.\n\nRetry after the game fully opens, or start GTA V yourself into story mode and press Retry Inject.',
+        [{ id: 'retryInject', label: 'Retry Inject' }, { id: 'cancel', label: 'Cancel' }]);
+      return;
+    }
     if (code === 'process-exited') {
       fail(7, 'GTA V exited unexpectedly',
         'The game closed during startup (Rockstar reports this in its "exited unexpectedly" dialog).\n\n1) Click OK in the Rockstar dialog if one is open.\n2) Press Retry here — GTAMP re-launches the game.\nIf it repeats: Safe Mode once (Rockstar dialog button) restores vanilla graphics, then Retry. Update GPU drivers and close overlays (ShadowPlay/Discord/Afterburner) only if it keeps happening.',
@@ -1912,6 +1923,10 @@ function runInjector(opts, onStage) {
   injectAttempt++;
   try {
     const args = ['--process','GTA5.exe','--dll',dllPath,'--timeout', String(opts.timeoutMs || 300000)];
+    if (opts.waitPid) {
+      args.push('--wait-pid'); // v1.9.8 — native process wait replaces the JS tasklist loop
+      args.push('--pid-timeout', String(opts.pidTimeoutMs || 150000));
+    }
     if (opts.waitWindow) {
       args.push('--wait-window');
       args.push('--settle-ms', String(opts.settleMs || 6000));

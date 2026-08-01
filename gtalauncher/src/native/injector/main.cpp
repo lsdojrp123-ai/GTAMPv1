@@ -47,13 +47,20 @@ static bool argFlag(const wchar_t* name) {
     LocalFree(argv); return has;
 }
 
+static bool isGameExe(const wchar_t* wanted, const wchar_t* got) {
+    if (!_wcsicmp(wanted, got)) return true;
+    // Either edition counts as "the game" (Legacy GTA5.exe / Enhanced GTA5_Enhanced.exe)
+    if (!_wcsicmp(wanted, L"GTA5.exe") && !_wcsicmp(got, L"GTA5_Enhanced.exe")) return true;
+    if (!_wcsicmp(wanted, L"GTA5_Enhanced.exe") && !_wcsicmp(got, L"GTA5.exe")) return true;
+    return false;
+}
 static DWORD findPid(const wchar_t* exe) {
     DWORD pid = 0;
     HANDLE s = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (s == INVALID_HANDLE_VALUE) return 0;
     PROCESSENTRY32W e; e.dwSize = sizeof(e);
     if (Process32FirstW(s, &e)) do {
-        if (!_wcsicmp(e.szExeFile, exe)) { pid = e.th32ProcessID; break; }
+        if (isGameExe(exe, e.szExeFile)) { pid = e.th32ProcessID; break; }
     } while (Process32NextW(s, &e));
     CloseHandle(s);
     return pid;
@@ -91,7 +98,7 @@ static DWORD WINAPI winMainThunk(LPVOID) { return 0; }
 
 int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, wchar_t* cmd, int) {
     wchar_t dll[1024] = { 0 }, process[260] = L"GTA5.exe";
-    DWORD pid = 0, waitMs = 120000, settleMs = 6000;
+    DWORD pid = 0, waitMs = 120000, settleMs = 6000, pidTimeoutMs = 0;
     bool waitPid = false, waitWindow = false, alreadyRunning = false, dlloverride = false;
     {
         // parse from our own copy of the command line (GUI-subsystem apps get it via GetCommandLineW)
@@ -105,21 +112,33 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, wchar_t* cmd, int) {
             else if (!wcscmp(argv[i], L"--already-running")) alreadyRunning = true;
             else if (!wcscmp(argv[i], L"--settle-ms") && i + 1 < argc) settleMs = wcstoul(argv[++i], NULL, 10);
             else if (!wcscmp(argv[i], L"--timeout") && i + 1 < argc) waitMs = wcstoul(argv[++i], NULL, 10);
+            else if (!wcscmp(argv[i], L"--pid-timeout") && i + 1 < argc) pidTimeoutMs = wcstoul(argv[++i], NULL, 10);
             else if (!wcscmp(argv[i], L"--dlloverride")) dlloverride = true;
         }
         LocalFree(argv);
     }
-    dbg(L"GTAMP injector 1.9.6 pid=%lu dlloverride=%d waitpid=%d waitwindow=%d alreadyrunning=%d settle=%lums timeout=%lums dll=[%s]",
+    dbg(L"GTAMP injector 1.9.8 pid=%lu dlloverride=%d waitpid=%d waitwindow=%d alreadyrunning=%d settle=%lums timeout=%lums dll=[%s]",
         pid, dlloverride ? 1 : 0, waitPid ? 1 : 0, waitWindow ? 1 : 0, alreadyRunning ? 1 : 0, settleMs, waitMs, dll);
+
+    // --probe: instant process check, no injection and no --dll required (v1.9.8 native gtaRunning)
+    if (argFlag(L"--probe")) {
+        DWORD p = pid ? pid : findPid(process);
+        if (p && processAlive(p)) { stage(L"stage:process-found pid=%lu", p); return 0; }
+        stage(L"error:process-timeout %s", process);
+        return 1;
+    }
     if (!dll[0]) { stage(L"error:no-dll"); return 2; }
 
-    // 1) resolve the game process
+    // 1) resolve the game process — v1.9.8 uses its own pid timeout so process wait and window wait have separate budgets
     if (!pid) {
-        ULONGLONG deadline = GetTickCount64() + (waitPid ? waitMs : 0);
+        DWORD pidWait = pidTimeoutMs ? pidTimeoutMs : waitMs;
+        ULONGLONG deadline = GetTickCount64() + (waitPid ? pidWait : 0);
+        int ptick = 0;
         for (;;) {
             pid = findPid(process);
             if (pid) break;
             if (!waitPid || GetTickCount64() >= deadline) { stage(L"error:process-timeout %s", process); return 1; }
+            if ((++ptick % 20) == 0) dbg(L"still waiting for process %s …", process);
             Sleep(500);
         }
     }
