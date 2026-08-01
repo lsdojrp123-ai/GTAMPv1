@@ -6,6 +6,34 @@
 
 ---
 
+# 📍 WHERE WE ARE — v1.6.0 (verified against the code)
+
+| Phase | Feature | Status | Evidence |
+|-------|---------|--------|----------|
+| 1 | Native hook (injector + DLL inside GTA5.exe, ScriptHookV natives) | ✅ Done | `src/native/hook/dllmain.cpp`, `gtamp_injector.exe` |
+| 2 | UDP relay + client bridge (hook ↔ launcher ↔ FXServer) | ✅ Done | `src/main/main.js` (TCP 22100 + UDP), `src/fxserver/` |
+| 3 | Read local pos / spawn & move peds in-game | ✅ Done | hook `pos` stream, `spawnPed` natives |
+| 4 | Server: join/kick/snapshot protocol | ✅ Done | `fxserver/index.js` player manager |
+| 5 | Remote player sync (spawn/update/despawn, TestBot solo fill) | ✅ Done | `netPed*` pipeline, solo TestBot |
+| 6 | **Remote player lifecycle, FiveM-style** — auto-create clone peds on join, despawn on leave/timeout, nametags `[id] name + HP%`, map blips, smooth lerp, ~320 m culling | ✅ Done | `dllmain.cpp` `drawNametags`, `addPlayerBlip`, `netPedClear`, `HOOK_VER "1.6.0"` |
+| 7 | **F8 chat sync** — F8 opens input, type, Enter sends; server relays to all clients; colored HUD lines + join/leave notices | ✅ Done | hook `submitChat`→`main.js`→`fxserver _handleChat`→broadcast→`pushChatLine`/`drawChatUI` |
+
+**Phases 1–7 are complete in the code.** If F8 chat didn't work on your machine, the almost-certain cause was the old **v1.5.2 hook** loading from a stale installed copy — your pasted log showed `GTAMP hook v1.5.2`. The hook DLL in `dist-bin/` and the packaged launcher on GitHub are both v1.6.0. Fresh install of the current `GTAMP-Launcher-v1.6.0.exe` fixes it.
+
+## ▶ NEXT — Phase 8: Health/stats sync + basic damage (Low risk)
+Sync real ped health in the `pos` packet (field exists, hook sends hardcoded 200), show real HP in nametags, apply damage between players.
+
+## Then
+| Phase | Feature | Risk |
+|-------|---------|------|
+| 9 | Vehicle sync (enter/exit, driver, position) | Medium (seat natives are finicky) |
+| 10 | Weapon/shot sync | Medium |
+| 11 | Animation/aim sync + smooth interpolation | Medium |
+| 12 | In-process DX11 overlay (replace F9 overlay with real IMGUI) | Medium (MinHook detour work) |
+| 13–16 | Custom asset streaming, scripting API, prediction, anti-cheat | High — FiveM's moat |
+
+---
+
 # GTAMP
 
 ## v1.6.0 file locations (no separate UPDATE pack)
