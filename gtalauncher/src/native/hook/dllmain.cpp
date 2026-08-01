@@ -17,7 +17,7 @@
 #pragma comment(lib,"version.lib")
 #pragma comment(lib,"winmm.lib")
 
-#define HOOK_VER "1.9.2"
+#define HOOK_VER "2.1.1"
 #define OVERLAY_KEY RGB(255,0,255)
 #define OV_CLASS "GTAMP_OV160"
 static volatile bool g_running=true;
@@ -47,6 +47,11 @@ struct Vec3{float x,y,z;};
 static uintptr_t g_base=0; static uint32_t g_size=0;
 struct Found{bool found;uintptr_t ped;Vec3 pos;float heading;int hp;uintptr_t world;char why[128];char err[256];uint32_t tries;uint32_t cands;} g_f={0};
 static bool g_shvReady=false;
+static DWORD g_shvTickMs=0;               // v2.1.1 — SHV fiber liveness (watched from the overlay thread)
+static bool  g_shvEntered=false;          // scriptMain entered at least once
+static bool  g_shvFailNotified=false;     // fiber-death reported to the launcher exactly once
+static char  g_shvFileInfo[160]={0};      // version resource of the user's ScriptHookV.dll
+static void readShvFileInfo(const char* path); // fwd decl
 static char g_shvMsg[256]={0};
 static int g_shvSpawnCount=0;
 static int g_netPedCount=0;
@@ -232,6 +237,27 @@ static void logf(const char* fmt,...){
 }
 static CRITICAL_SECTION g_sendCs;
 static void sl(const char*s){if(!s||g_sock==INVALID_SOCKET)return;EnterCriticalSection(&g_sendCs);send(g_sock,s,(int)strlen(s),0);LeaveCriticalSection(&g_sendCs);}
+// v2.1.1 — fingerprint the user's ScriptHookV.dll so a build-mismatch card can name the exact file
+static void readShvFileInfo(const char* path){
+  DWORD sz=GetFileVersionInfoSizeA(path,NULL);
+  if(!sz){ snprintf(g_shvFileInfo,sizeof(g_shvFileInfo)-1,"(no version info)"); return; }
+  BYTE* buf=(BYTE*)HeapAlloc(GetProcessHeap(),0,sz+16);
+  if(!buf){ snprintf(g_shvFileInfo,sizeof(g_shvFileInfo)-1,"(version read failed)"); return; }
+  if(GetFileVersionInfoA(path,0,sz,buf)){
+    char prod[80]={0},comp[80]={0}; void* pv=NULL; UINT pl=0;
+    if(VerQueryValueA(buf,"\\StringFileInfo\\040904b0\\ProductName",&pv,&pl)&&pv)strncpy(prod,(const char*)pv,79);
+    pv=NULL; pl=0;
+    if(VerQueryValueA(buf,"\\StringFileInfo\\040904b0\\CompanyName",&pv,&pl)&&pv)strncpy(comp,(const char*)pv,79);
+    VS_FIXEDFILEINFO* fi=NULL; UINT fl=0;
+    if(VerQueryValueA(buf,"\\",(void**)&fi,&fl)&&fi&&fl>=sizeof(VS_FIXEDFILEINFO))
+      snprintf(g_shvFileInfo,159,"%s %u.%u.%u.%u (%s)",prod[0]?prod:"ScriptHookV.dll",
+        (unsigned)HIWORD(fi->dwFileVersionMS),(unsigned)LOWORD(fi->dwFileVersionMS),
+        (unsigned)HIWORD(fi->dwFileVersionLS),(unsigned)LOWORD(fi->dwFileVersionLS),comp);
+    else snprintf(g_shvFileInfo,159,"%s (%s)",prod,comp);
+  }
+  HeapFree(GetProcessHeap(),0,buf);
+  for(char* c=g_shvFileInfo; *c; c++){ if(*c=='"'||*c=='\\') *c='\''; }
+}
 static void sendJson(const char*fmt,...){char b[1024];va_list a;va_start(a,fmt);vsnprintf(b,sizeof(b),fmt,a);va_end(a);size_t n=strlen(b);if(n<sizeof(b)-2){b[n]='\n';b[n+1]=0;}sl(b);}
 
 static bool isBad(uintptr_t a,size_t n){return !a||IsBadReadPtr((void*)a,n)!=0;}
@@ -690,7 +716,7 @@ static void tickLocalTestBot_SHV(DWORD now){
 }
 
 static void __cdecl shvScriptMain(){
-    logf("SHV scriptMain: entered (v" HOOK_VER ")");using namespace shv;
+    logf("SHV scriptMain: entered (v" HOOK_VER ")");g_shvEntered=true;using namespace shv;
     const uint64_t H_PLAYER_ID=0x4F8644AF03D0E0D6ULL,H_PPID=0xD80958FC74E988A6ULL,H_GEC=0x3FEF770D40960D5AULL,H_GEH=0xE83D4F9BA2A38914ULL;
     wait(5000);logf("SHV: initial 5s wait done.");int pidx=0;DWORD lastTick=0,lastPosSend=0,lastNetTick=0;DWORD t0=timeGetTime();
     while(g_running){wait(0);DWORD now=timeGetTime();
@@ -854,7 +880,7 @@ static void __cdecl shvScriptMain(){
             wait(0);
         }
         // Read local pos @ ~20Hz, send to bridge @ ~10Hz
-        if(now-lastTick>50){lastTick=now;float x=0,y=0,z=0,h=0;Invoker(H_GEC).argi(g_localPed).argb(true).ret3f(x,y,z);h=Invoker(H_GEH).argi(g_localPed).retf();if(x||y||z){g_shvLastPedCoords.x=x;g_shvLastPedCoords.y=y;g_shvLastPedCoords.z=z;g_shvLastHeading=h;}static DWORD ll=0;if(now-ll>5000){ll=now;logf("SHV tick: pos=%.1f,%.1f,%.1f h=%.1f netPeds=%d",x,y,z,h,g_netPedCount);}if(now-lastPosSend>100){lastPosSend=now;int mhp=Invoker(0xEEF059A8E6C27644ULL).argi(g_localPed).reti(),mar=Invoker(0x9483AF821605B1D8ULL).argi(g_localPed).reti();sendJson("{\"t\":\"pos\",\"x\":%.3f,\"y\":%.3f,\"z\":%.3f,\"h\":%.2f,\"ped\":%d,\"health\":%d,\"armour\":%d}",x,y,z,h,g_localPed,mhp,mar);}}
+        if(now-lastTick>50){lastTick=now;g_shvTickMs=now;float x=0,y=0,z=0,h=0;Invoker(H_GEC).argi(g_localPed).argb(true).ret3f(x,y,z);h=Invoker(H_GEH).argi(g_localPed).retf();if(x||y||z){g_shvLastPedCoords.x=x;g_shvLastPedCoords.y=y;g_shvLastPedCoords.z=z;g_shvLastHeading=h;}static DWORD ll=0;if(now-ll>5000){ll=now;logf("SHV tick: pos=%.1f,%.1f,%.1f h=%.1f netPeds=%d",x,y,z,h,g_netPedCount);}if(now-lastPosSend>100){lastPosSend=now;int mhp=Invoker(0xEEF059A8E6C27644ULL).argi(g_localPed).reti(),mar=Invoker(0x9483AF821605B1D8ULL).argi(g_localPed).reti();sendJson("{\"t\":\"pos\",\"x\":%.3f,\"y\":%.3f,\"z\":%.3f,\"h\":%.2f,\"ped\":%d,\"health\":%d,\"armour\":%d}",x,y,z,h,g_localPed,mhp,mar);}}
         // Drain one spawn from queue per tick (process oldest pending).
         EnterCriticalSection(&g_qCs);
         bool hasQ=(g_qTail!=g_qHead);
@@ -989,7 +1015,18 @@ static DWORD WINAPI overlayThread(LPVOID){logf("overlay start");HINSTANCE hi=(HI
     while(g_running){while(PeekMessageA(&m,NULL,0,0,PM_REMOVE)){TranslateMessage(&m);DispatchMessageA(&m);}if(!g_gta||!IsWindow(g_gta))g_gta=findGtaWnd();if(g_gta&&IsWindow(g_gta)&&g_ov){RECT g;if(IsWindowVisible(g_gta)&&GetWindowRect(g_gta,&g)){bool full=g_consoleOpen||g_joinActive;
 if(full)SetWindowPos(g_ov,HWND_TOPMOST,g.left,g.top,g.right-g.left,g.bottom-g.top,SWP_NOACTIVATE|SWP_SHOWWINDOW|SWP_NOOWNERZORDER);
 else SetWindowPos(g_ov,HWND_TOPMOST,g.left+16,g.top+16,720,240,SWP_NOACTIVATE|SWP_SHOWWINDOW|SWP_NOOWNERZORDER);
-ShowWindow(g_ov,(full||g_vis)?SW_SHOWNOACTIVATE:SW_HIDE);InvalidateRect(g_ov,NULL,FALSE);}}if(GetAsyncKeyState(VK_F9)&1){g_vis=!g_vis;logf("overlay %s",g_vis?"on":"off");Sleep(250);}if(GetAsyncKeyState(VK_F10)&1){if(g_shvReady){logf("rescan (F10)");g_f.found=false;la=timeGetTime()-2000;doScan();}Sleep(250);}if(GetAsyncKeyState(VK_F11)&1){if(shv::loaded()){logf("F11 pressed - queuing local cop spawn (shvReady=%d)",(int)g_shvReady);SpawnReq r={0};strcpy_s(r.src,"F11");strcpy_s(r.model,"s_m_y_cop_01");r.useOffset=true;r.pedType=6;queueSpawn(&r);if(!g_shvReady)snprintf(g_shvMsg,sizeof(g_shvMsg),"F11 queued - will spawn once loaded");}else{logf("F11 pressed but SHV not loaded");snprintf(g_shvMsg,sizeof(g_shvMsg),"Waiting for ScriptHookV...");}Sleep(500);}{ // v1.8.0 — F8 console: works even before ScriptHookV is ready (like FiveM)
+ShowWindow(g_ov,(full||g_vis)?SW_SHOWNOACTIVATE:SW_HIDE);InvalidateRect(g_ov,NULL,FALSE);}}{
+  // v2.1.1 — SHV fiber watchdog: a FATAL "cannot find native" dialog means ScriptHookV killed
+  // our script thread (its native table does not match this GTA build). Report to the launcher
+  // ONCE so the connect card names the problem instead of parking at "linking multiplayer hook".
+  static DWORD lastW=0; DWORD nowW=timeGetTime();
+  if(!g_shvFailNotified && g_shvEntered && g_shvTickMs!=0 && nowW-g_shvTickMs>8000 && nowW-lastW>2000){
+    lastW=nowW; g_shvFailNotified=true; g_shvReady=false;
+    logf("SHV WATCHDOG: fiber frozen >8s — ScriptHookV cannot resolve natives on this GTA build (fatal dialog). shv=[%s]",
+      g_shvFileInfo[0]?g_shvFileInfo:"unknown");
+    sendJson("{\\\"t\\\":\\\"shvFail\\\",\\\"shv\\\":\\\"%s\\\"}", g_shvFileInfo[0]?g_shvFileInfo:"unknown");
+  }
+}if(GetAsyncKeyState(VK_F9)&1){g_vis=!g_vis;logf("overlay %s",g_vis?"on":"off");Sleep(250);}if(GetAsyncKeyState(VK_F10)&1){if(g_shvReady){logf("rescan (F10)");g_f.found=false;la=timeGetTime()-2000;doScan();}Sleep(250);}if(GetAsyncKeyState(VK_F11)&1){if(shv::loaded()){logf("F11 pressed - queuing local cop spawn (shvReady=%d)",(int)g_shvReady);SpawnReq r={0};strcpy_s(r.src,"F11");strcpy_s(r.model,"s_m_y_cop_01");r.useOffset=true;r.pedType=6;queueSpawn(&r);if(!g_shvReady)snprintf(g_shvMsg,sizeof(g_shvMsg),"F11 queued - will spawn once loaded");}else{logf("F11 pressed but SHV not loaded");snprintf(g_shvMsg,sizeof(g_shvMsg),"Waiting for ScriptHookV...");}Sleep(500);}{ // v1.8.0 — F8 console: works even before ScriptHookV is ready (like FiveM)
   static bool f8w=false,escw=false,retw=false,bkw=false;
   bool f8=(GetAsyncKeyState(VK_F8)&0x8000)!=0;
   if(f8&&!f8w){
@@ -1194,7 +1231,7 @@ static VOID WINAPI delayedShvLoad(PVOID){
             if(!GetModuleHandleW(pin[i])) LoadLibraryW(fp);
         }
     }
-    {HMODULE pe[2048];DWORD need=0;if(EnumProcessModules(GetCurrentProcess(),(HMODULE*)pe,sizeof(pe),&need)){DWORD n=need/sizeof(HMODULE);for(DWORD i=0;i<n&&i<512;i++){char nme[MAX_PATH]={0};if(GetModuleFileNameA(pe[i],nme,MAX_PATH)){const char*b=strrchr(nme,'\\');b=b?b+1:nme;if(strstr(b,"ScriptHook")||!_stricmp(b,"dinput8.dll")||!_stricmp(b,"ScriptHookV.dll"))logf("  module[%u]: %s @ %p",i,nme,(void*)pe[i]);}}}}for(int i=0;i<120&&g_running;i++){if(shv::load()){logf("ScriptHookV exports resolved OK");shv::registerScript(shvScriptMain);logf("scriptRegister called (fn=%p)",(void*)shvScriptMain);return;}if(i==0)logf("SHV not found initially (err=%u). Will retry.",(unsigned)GetLastError());Sleep(500);}logf("ScriptHookV not loadable after 60s.");
+    {HMODULE pe[2048];DWORD need=0;if(EnumProcessModules(GetCurrentProcess(),(HMODULE*)pe,sizeof(pe),&need)){DWORD n=need/sizeof(HMODULE);for(DWORD i=0;i<n&&i<512;i++){char nme[MAX_PATH]={0};if(GetModuleFileNameA(pe[i],nme,MAX_PATH)){const char*b=strrchr(nme,'\\');b=b?b+1:nme;if(strstr(b,"ScriptHook")||!_stricmp(b,"dinput8.dll")||!_stricmp(b,"ScriptHookV.dll")){logf("  module[%u]: %s @ %p",i,nme,(void*)pe[i]); if(strstr(b,"ScriptHook")&&!g_shvFileInfo[0])readShvFileInfo(nme);}}}}}for(int i=0;i<120&&g_running;i++){if(shv::load()){logf("ScriptHookV exports resolved OK");shv::registerScript(shvScriptMain);logf("scriptRegister called (fn=%p)",(void*)shvScriptMain);return;}if(i==0)logf("SHV not found initially (err=%u). Will retry.",(unsigned)GetLastError());Sleep(500);}logf("ScriptHookV not loadable after 60s.");
 }
 BOOL APIENTRY DllMain(HMODULE m,DWORD r,LPVOID){if(r==DLL_PROCESS_ATTACH){DisableThreadLibraryCalls(m);
     InitializeCriticalSection(&g_qCs);InitializeCriticalSection(&g_npCs);InitializeCriticalSection(&g_sendCs);InitializeCriticalSection(&g_conCs);g_pid=GetCurrentProcessId();char t[MAX_PATH];GetTempPathA(MAX_PATH,t);strcat_s(t,MAX_PATH,"gtamp_hook.log");fclose(fopen(t,"w"));logf("==== GTAMP hook v%s PID=%u ====",HOOK_VER,(unsigned)g_pid);HMODULE hm=GetModuleHandleA("GTA5.exe");if(!hm){logf("ERROR: GTA5.exe not found");return TRUE;}detectBuild(hm);shv::setLogger([](const char*s){logf("%s",s);});shv::setSelfHinst(m);CloseHandle(CreateThread(NULL,0,(LPTHREAD_START_ROUTINE)delayedShvLoad,NULL,0,NULL));g_ovT=CreateThread(NULL,0,overlayThread,NULL,0,NULL);g_netT=CreateThread(NULL,0,netThread,NULL,0,NULL);}else if(r==DLL_PROCESS_DETACH){g_running=false;if(g_ovT){WaitForSingleObject(g_ovT,3000);CloseHandle(g_ovT);}if(g_netT){WaitForSingleObject(g_netT,3000);CloseHandle(g_netT);}DeleteCriticalSection(&g_qCs);DeleteCriticalSection(&g_npCs);DeleteCriticalSection(&g_sendCs);DeleteCriticalSection(&g_conCs);logf("unloaded");}return TRUE;}

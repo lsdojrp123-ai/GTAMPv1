@@ -386,6 +386,9 @@ function ensureHookTcpServer() {
           if (m.t === 'hookHello') {
             writeLaunchDiag(['hookHello v=' + (m.v || '?') + ' gta=' + (m.gta || '?')]);
             if (connectCtl) connectCtl.event('hookHello', m.v || '?');
+          } else if (m.t === 'shvFail') {
+            writeLaunchDiag(['HOOK SHV FAILURE — ScriptHookV cannot resolve natives on this GTA build. shv=[' + (m.shv || '?') + ']']);
+            if (connectCtl) { connectCtl.shvFail = String(m.shv || ''); connectCtl.event('shvFail'); }
           } else if (m.t === 'ready') {
             writeLaunchDiag(['hook SHV ready ped=' + m.ped]);
             if (connectCtl) connectCtl.event('hookReady');
@@ -819,7 +822,7 @@ function verifyGtaOwnership(dir) {
 }
 
 // ---------- Loading window: startup splash + server connect (v1.7.0) ----------
-const LAUNCHER_VER = '2.1.0';
+const LAUNCHER_VER = '2.1.1';
 function openLoading(mode, opts = {}) {
   closeLoading();
   loadingWin = new BrowserWindow({
@@ -1079,12 +1082,13 @@ async function pickGtaFolderDialog() {
 // Actions from loading.html buttons (startup errors + connect cancel)
 ipcMain.on('loading:action', (_e, act) => {
   const id = typeof act === 'string' ? act : (act && act.id);
-  if (connectCtl && ['cancel', 'retry', 'retryInject', 'pickFolder', 'quit', 'relaunchAdmin', 'forceInject'].includes(id)) {
+  if (connectCtl && ['cancel', 'retry', 'retryInject', 'pickFolder', 'quit', 'relaunchAdmin', 'forceInject', 'updateShv'].includes(id)) {
     (async () => {
       if (id === 'cancel') return connectCtl.cancel();
       if (id === 'quit') return app.quit();
       if (id === 'relaunchAdmin') return relaunchElevated();
       if (id === 'forceInject') { try { connectCtl.event('forceInjectReq'); } catch {} return; }
+      if (id === 'updateShv') { try { shell.openExternal('https://www.dev-c.com/gtav/scripthookv/'); } catch (e) { writeLaunchDiag(['openExternal shv: ' + e.message]); } return; }
       if (id === 'pickFolder') {
         const p = await pickGtaFolderDialog();
         if (p) { config.gtaPath = p; saveConfig(config); connectCtl.retry(); }
@@ -1472,6 +1476,13 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
       sendLoading('diag', { line: stamp + '  ' + line });
     } catch {}
   };
+  // v2.1.1 — the hook reports ScriptHookV's FATAL "can't find native" (build mismatch) via its
+  // fiber watchdog; turn it into an exact, actionable card instead of a silent dead connect
+  const shvFailCard = () => fail(9, 'ScriptHookV cannot run on your GTA V build',
+    'GTA just showed SCRIPT HOOK V CRITICAL ERROR — FATAL: cannot find native — and GTAMP is telling you why: the ScriptHookV.dll in your GTA folder cannot resolve game functions on your GTA V build (GTA updated past it, or it is an old/forked copy: [' + (ctl.shvFail || 'unknown file') + ']).' +
+    '\n\nOne-minute fix:\n1) Press OPEN SCRIPTHOOK DOWNLOAD (official dev-c.com page).\n2) From the ZIP, copy ScriptHookV.dll AND dinput8.dll into your GTA V folder (overwrite old ones).\n3) Close GTA completely, then press Retry Inject here.' +
+    '\n\nGTAMP drives other players through ScriptHookV, so the file must match your game — like FiveM shipping its own matching layer.',
+    [{ id: 'updateShv', label: 'Open ScriptHookV download' }, { id: 'retryInject', label: 'Retry Inject' }, { id: 'cancel', label: 'Cancel' }]);
   const fail = (i, title, detail, actions) => {
     setStep(i, 'failed');
     const diagText = 'GTAMP v' + LAUNCHER_VER + ' — connect failure: ' + title + '\n' + (detail || '') +
@@ -1801,9 +1812,10 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
   // STEP 10 — hook link
   setStep(10, 'active', 'Waiting for the hook to report in…');
   try { hookConnect(); } catch (e) {}
-  const helloOk = await ctl.waitFor('hookHello', 90000);
+  const helloOk = await Promise.race([ctl.waitFor('hookHello', 90000), ctl.waitFor('shvFail', 90000).then(() => 'shvFail')]);
   if (ctl.cancelled) return;
-  if (!helloOk) {
+  if (ctl.events['shvFail']) { shvFailCard(); return; }
+  if (helloOk !== true) {
     fail(10, 'Hook did not come online',
       'The DLL was injected but never connected back. Antivirus may be blocking it — or try Retry Inject.',
       [{ id: 'retryInject', label: 'Retry Inject' }, { id: 'cancel', label: 'Cancel' }]);
@@ -1815,15 +1827,17 @@ async function runConnectFlow({ launch, serverAddr, effectiveAddr }) {
   // STEP 11 — server handshake
   setStep(11, 'active', 'Handshaking with ' + effectiveAddr + '…');
   try { hookBroadcast({ t: 'joinStage', stage: 'Handshaking with server' }); } catch {}
-  const welcomeOk = await ctl.waitFor('welcome', 15000);
+  const welcomeOk = await Promise.race([ctl.waitFor('welcome', 15000), ctl.waitFor('shvFail', 15000).then(() => 'shvFail')]);
   if (ctl.cancelled) return;
+  if (ctl.events['shvFail']) { shvFailCard(); return; }
   setStep(11, 'done', welcomeOk ? 'connected' : 'server unreachable — continuing offline');
 
   // STEP 12 — spawn
   setStep(12, 'active', 'Streaming world state…');
   try { hookBroadcast({ t: 'joinStage', stage: 'Loading session — streaming world' }); } catch {}
-  await ctl.waitFor('spawn', 15000);
+  await Promise.race([ctl.waitFor('spawn', 15000), ctl.waitFor('shvFail', 15000).then(() => null)]);
   if (ctl.cancelled) return;
+  if (ctl.events['shvFail']) { shvFailCard(); return; }
   setStep(12, 'done');
 
   loadingStatus('IN SESSION — HAVE FUN!', 'GTAMP keeps running in the background', 1);

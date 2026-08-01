@@ -80,8 +80,8 @@ app.post('/api/servers/report', (req, res) => {
   res.json({ ok: true, id: srv.id });
 });
 
-// v2.1.0 — component update channel consumed by the launcher's "Updating components" stage
-const LAUNCHER_VERSION = '2.1.0';
+// v2.1.1 — component update channel consumed by the launcher's "Updating components" stage
+const LAUNCHER_VERSION = '2.1.1';
 app.get('/api/launcher/version', (req, res) => {
   res.json({ version: LAUNCHER_VERSION, url: '/download/GTAMP-Launcher-v' + LAUNCHER_VERSION + '.exe' });
 });
@@ -112,7 +112,7 @@ app.get('/api/launcher/active', (req, res) => {
 // ---------- Download ----------
 app.get('/download/:file', (req, res) => {
   const file = path.basename(req.params.file);
-  // v2.1.0 — serve whichever build lives at repo root: GTAMP-Setup.exe (installer) or versioned portable
+  // v2.1.1 — serve whichever build lives at repo root: GTAMP-Setup.exe (installer) or versioned portable
   const candidates = [file];
   if (!file.startsWith('GTAMP-')) candidates.push('GTAMP-Launcher-' + file);
   for (const name of candidates) {
