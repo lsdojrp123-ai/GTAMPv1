@@ -819,7 +819,7 @@ function verifyGtaOwnership(dir) {
 }
 
 // ---------- Loading window: startup splash + server connect (v1.7.0) ----------
-const LAUNCHER_VER = '1.9.6';
+const LAUNCHER_VER = '1.9.7';
 function openLoading(mode, opts = {}) {
   closeLoading();
   loadingWin = new BrowserWindow({
@@ -1646,12 +1646,28 @@ function createWindow() {
 // v1.7.0: splash screen FIRST (FiveM-style), main window only after startup done.
 // v1.9.2 — FiveM parity: ONE client process only. A duplicate instance can't bind the MP
 // ports and would sit forever at "Starting multiplayer services" (the reported hang).
-// Second instance → focus the first one and exit silently.
-const singleInstanceLock = app.requestSingleInstanceLock();
+// v1.9.7 — stale-instance takeover: if the lock is HELD, a frozen older launcher owns it
+// (user runs the new exe but the zombie old window answers — "file says 1.9.6, screen says
+// 1.9.0"). FiveM's -switchcl handoff favors the NEW client; we now do the same: kill the
+// stale GTAMP processes and retake the lock instead of app.exit(0).
+function killStaleLauncherInstances() {
+  if (process.platform !== 'win32' || !app.isPackaged) return;
+  try { require('child_process').execSync('taskkill /F /IM "GTAMP-Launcher-*.exe" /FI "PID ne ' + process.pid + '"', { windowsHide: true, stdio: 'ignore', timeout: 8000 }); } catch {}
+  try { require('child_process').execSync('taskkill /F /IM gtamp_injector.exe', { windowsHide: true, stdio: 'ignore', timeout: 8000 }); } catch {}
+  try { writeLaunchDiag(['stale instance takeover: killed old GTAMP launcher/injector processes']); } catch {}
+}
+let singleInstanceLock = app.requestSingleInstanceLock();
 if (!singleInstanceLock) {
-  app.exit(0);
-} else {
+  killStaleLauncherInstances();
+  try { require('child_process').execSync('ping 127.0.0.1 -n 2 >nul', { windowsHide: true, stdio: 'ignore', timeout: 5000 }); } catch {} // ~1s for the mutex to release
+  singleInstanceLock = app.requestSingleInstanceLock();
+  if (!singleInstanceLock) app.exit(0); // genuinely could not take over — bail as before
+}
+if (singleInstanceLock) {
   app.on('second-instance', () => {
+    // second click while we're already running → the other process kills itself via the
+    // takeover path above; here we just make sure OUR window comes forward.
+    if (loadingWin && !loadingWin.isDestroyed()) { loadingWin.show(); loadingWin.focus(); }
     if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.show(); mainWindow.focus();

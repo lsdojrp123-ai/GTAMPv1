@@ -41,6 +41,11 @@
 - **T chat** in-game (FiveM keybinding); F9 toggles the debug HUD.
 - **Tray/background**: GTAMP keeps running in the tray while you play; quitting GTA returns you to the launcher; `disconnectSession` cleans the session from console/launcher.
 
+## v1.9.7 — stale-instance takeover: "file says 1.9.6, screen says 1.9.0" fixed forever
+- Root cause of the final stuck-screen reports: the **old frozen v1.9.0 window was still running** and held the Electron single-instance lock. Launching the new v1.9.6 exe made the *new* process exit silently and refocus the zombie old window (`second-instance` → focus first instance) — so every fresh download appeared to "say 1.9.0 and get stuck on the same screen."
+- v1.9.7 flips the handoff to FiveM `-switchcl` semantics (the **new** client wins): when the single-instance lock is already held, the launcher now `taskkill`s every other `GTAMP-Launcher-*.exe` except its own pid (plus orphan `gtamp_injector.exe`), waits for the mutex to release, and retakes the lock. A genuinely-unkillable lock still exits quietly, but a zombie can no longer outvote a fresh download.
+- `second-instance` now also raises the loading/splash window, not just the main one.
+
 ## v1.9.6 — self-updating launcher (FiveM Bootstrap parity) + stall-proof window wait
 **The auto-update era starts here: from v1.9.6 onward the launcher patches itself — one manual download, never again.**
 - **FiveM-style self-update at startup.** FiveM's `Bootstrap.cpp` updates the client *before* the game ever loads; GTAMP now does the same: startup step 2 checks GitHub Releases (canonical, always-latest — independent of any website you have running) for a newer tag, downloads the new exe in-app with a live progress bar (`UPDATING GTAMP — N%`), sanity-checks it (size + MZ header), spawns it, and exits itself. Community website `/api/launcher/version` is the fallback source. Skipped automatically in dev/unpackaged runs; every step goes to `%TEMP%\gtamp_launcher_diag.log`. Failure never blocks startup — it continues into the current version.
