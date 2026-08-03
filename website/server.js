@@ -81,7 +81,7 @@ app.post('/api/servers/report', (req, res) => {
 });
 
 // v2.1.1 — component update channel consumed by the launcher's "Updating components" stage
-const LAUNCHER_VERSION = '2.2.1';
+const LAUNCHER_VERSION = '2.2.2';
 app.get('/api/launcher/version', (req, res) => {
   res.json({ version: LAUNCHER_VERSION, url: '/download/GTAMP-Launcher-v' + LAUNCHER_VERSION + '.exe' });
 });

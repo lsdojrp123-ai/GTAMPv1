@@ -1,4 +1,4 @@
-/* GTAMP Hook v2.2.1 - resolves GTA natives ITSELF (FiveM rage-scripting-five behavior port, own_invoker.h):
+/* GTAMP Hook v2.2.2 - resolves GTA natives ITSELF (FiveM rage-scripting-five behavior port, own_invoker.h):
  * stale ScriptHookV native databases can no longer stop multiplayer with "FATAL: Can't find native". */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -18,7 +18,7 @@
 #pragma comment(lib,"version.lib")
 #pragma comment(lib,"winmm.lib")
 
-#define HOOK_VER "2.2.1"
+#define HOOK_VER "2.2.2"
 #define OVERLAY_KEY RGB(255,0,255)
 #define OV_CLASS "GTAMP_OV160"
 static volatile bool g_running=true;
@@ -716,25 +716,89 @@ static void tickLocalTestBot_SHV(DWORD now){
     // processNetPeds will lerp/set coords
 }
 
+
+// v2.2.2 — every native the hook relies on, named, for the up-front probe. If any of these
+// is missing on the user's build we can SAY which one instead of playing dead.
+struct ProbeHash { uint64_t h; const char* name; };
+static const ProbeHash g_probeHashes[] = {
+    {0x4F8644AF03D0E0D6ULL,"PLAYER_ID"},{0xD80958FC74E988A6ULL,"PLAYER_PED_ID"},
+    {0xEEF059A8E6C27644ULL,"GET_ENTITY_HEALTH"},{0xE83D4F9BA2A38914ULL,"GET_ENTITY_COORDS"},
+    {0x963D27A58DF860ACULL,"REQUEST_MODEL"},{0x98A4EB5D89A0C952ULL,"HAS_MODEL_LOADED"},
+    {0xD49F9B0955C367DEULL,"CREATE_PED"},{0xE532F5D78798DAABULL,"SET_MODEL_AS_NO_LONGER_NEEDED"},
+    {0x45EEE61580806D63ULL,"SET_PED_DEFAULT_COMPONENT_VARIATION"},
+    {0x428CA6DBD1094446ULL,"FREEZE_ENTITY_POSITION"},{0xAD738C3085FE7E11ULL,"SET_ENTITY_AS_MISSION_ENTITY"},
+    {0x239A3351AC1DA385ULL,"SET_ENTITY_COORDS"},{0x8E2530AA8ADA980EULL,"SET_ENTITY_HEADING"},
+    {0x3882114BDE571AD4ULL,"SET_ENTITY_INVINCIBLE"},{0x7239B21A38F536BAULL,"DOES_ENTITY_EXIST"},
+    {0xEA1C610A04DB6BBBULL,"SET_ENTITY_VISIBLE"},{0x47D6F43D77935C75ULL,"IS_ENTITY_VISIBLE"},
+    {0x5CDE92C702A8FCE7ULL,"ADD_BLIP_FOR_ENTITY"},{0xDF735600A4696DAFULL,"SET_BLIP_SPRITE"},
+    {0x03D7FB09E75D6B7EULL,"SET_BLIP_COLOUR"},{0xD38744167B2FA257ULL,"SET_BLIP_SCALE"},
+    {0xBE8BE4FE60E27B72ULL,"SET_BLIP_AS_SHORT_RANGE"},{0x86A652570E5F25DDULL,"REMOVE_BLIP"},
+    {0xAE3CBE5BF394C9C9ULL,"DELETE_ENTITY"},{0x6B76DC1F3AE6E6A8ULL,"SET_ENTITY_HEALTH"},
+    {0xC86D67D52A707CF8ULL,"HAS_ENTITY_BEEN_DAMAGED_BY_ENTITY"},{0x9483AF821605B1D8ULL,"GET_PED_ARMOUR"},
+    {0xCEBA04A519F17003ULL,"SET_PED_ARMOUR"},{0x3317DEDB88C95038ULL,"IS_PED_DEAD_OR_DYING"},
+    {0x9F8AA94D6D97DBF4ULL,"SET_BLOCKING_OF_NON_TEMPORARY_EVENTS"},{0xB128377056A54E2AULL,"SET_PED_CAN_RAGDOLL"},
+    {0xF99F1F3B5A9D2E5EULL,"SET_RAGDOLL_ON_COLLISION(unsure)"},{0x9F7794730795E019ULL,"SET_PED_COMBAT_ATTRIBUTES"},
+    {0x70A2D1137C8ED7C9ULL,"SET_PED_FLEE_ATTRIBUTES"},{0x63F58F7C80513AADULL,"SET_PED_CAN_BE_TARGETTED"},
+    {0x4328652AE5769C71ULL,"SET_PED_CAN_BE_TARGETTED_BY_PLAYER"},{0x1A9205C1B9EE827FULL,"SET_ENTITY_COLLISION"},
+    {0x1913FE4CBF41C463ULL,"SET_PED_CONFIG_FLAG"},{0x919BE13EED931959ULL,"TASK_STAND_STILL"},
+    {0x5BA7919BED300023ULL,"SET_PED_DIES_WHEN_INJURED"},{0x3FEF770D40960D5AULL,"GET_ENTITY_COORDS(alt)"},
+    {0x078EBE9809CCD637ULL,"GET_ENTITY_HEADING"},{0x07C837F9A01C34C9ULL,"(misc-07C8)"},
+    {0x2513DFB0FB8400FEULL,"(misc-2513)"},{0x25FBB336DF1804CBULL,"(misc-25FB)"},
+    {0x34E82F05DF2974F5ULL,"(misc-34E8)"},{0x63145D9C883A1A70ULL,"(misc-6314)"},
+    {0x66E0276CC5F6B9DAULL,"(misc-66E0)"},{0x6C188BE134E074AAULL,"(misc-6C18)"},
+};
+#define PROBE_N (sizeof(g_probeHashes)/sizeof(g_probeHashes[0]))
+
 static void __cdecl shvScriptMain(){
     logf("SHV scriptMain: entered (v" HOOK_VER ")");g_shvEntered=true;using namespace shv;
     const uint64_t H_PLAYER_ID=0x4F8644AF03D0E0D6ULL,H_PPID=0xD80958FC74E988A6ULL,H_GEC=0x3FEF770D40960D5AULL,H_GEH=0xE83D4F9BA2A38914ULL;
     wait(5000);logf("SHV: initial 5s wait done.");int pidx=0;DWORD lastTick=0,lastPosSend=0,lastNetTick=0;DWORD t0=timeGetTime();
-    // v2.2.0 — light up GTAMP's own native engine BEFORE the first native call (FiveM behavior).
-    // The game table is populated by the time we run (window existed at inject), so this normally
-    // succeeds on attempt #1. Failures retry (the game may still be mid-load); after ~40s the hook
-    // permanently falls back to the ScriptHookV exports (v2.1.1 path).
-    {static bool announced=false;
-     for(int i=0;i<40 && own::state()==0 && g_running;i++){ own::init(g_base,(uint32_t)g_size); if(own::state()==0) wait(1000); }
-     if(own::active()){
-         if(!announced){announced=true;logf("owninv: ACTIVE — %d natives in table; ScriptHookV is now only the fiber scheduler",own::natives());
-             sendJson("{\"t\":\"nativeScan\",\"own\":1,\"natives\":%d,\"gta\":\"%s\"}",own::natives(),g_ver[0]?g_ver:"?");}
-     } else {
-         own::fail();logf("owninv: UNAVAILABLE after retries — NO native engine (SHV invoked-path removed in v2.2.1; the fiber stays alive, natives no-op)");
-         sendJson("{\"t\":\"noInv\",\"gta\":\"%s\"}",g_ver[0]?g_ver:"?");
-     }}
+    // v2.2.2 — light up GTAMP's own native engine, then PROVE it: resolve our entire native
+    // set up front and report found/total (+names of the missing) to the launcher feed before
+    // touching the game. The engine never goes permanently dark: if the table wasn't ready yet
+    // (mid-load), the ped-watch below keeps retrying every 5s until it appears.
+    static bool ownAnnounced=false, ownProbed=false, noInvSent=false;
+    static DWORD ownRetryAt=0;
+    if(own::state()==0){
+        own::init(g_base,(uint32_t)g_size);
+    }
+    if(own::active() && !ownAnnounced){
+        ownAnnounced=true;
+        logf("owninv: ACTIVE — %d natives in table; ScriptHookV is now only the fiber scheduler",own::natives());
+        sendJson("{\"t\":\"nativeScan\",\"own\":1,\"natives\":%d,\"gta\":\"%s\"}",own::natives(),g_ver[0]?g_ver:"?");
+    }
+    if(own::active() && !ownProbed){
+        ownProbed=true; int found=0, missN=0; char miss[96]={0};
+        for(size_t pi=0; pi<PROBE_N; pi++){
+            if(own::resolve(g_probeHashes[pi].h)){ found++; }
+            else if(missN<4){ if(miss[0]) strcat_s(miss,sizeof(miss),","); strcat_s(miss,sizeof(miss),g_probeHashes[pi].name); missN++; logf("owninv: PROBE MISS %s (0x%016llX)",g_probeHashes[pi].name,(unsigned long long)g_probeHashes[pi].h); }
+        }
+        logf("owninv: PROBE %d/%d resolved (PLAYER_ID=%s PED=%s HEALTH=%s)",found,(int)PROBE_N,
+            own::resolve(0x4F8644AF03D0E0D6ULL)?"ok":"MISS",own::resolve(0xD80958FC74E988A6ULL)?"ok":"MISS",own::resolve(0xEEF059A8E6C27644ULL)?"ok":"MISS");
+        sendJson("{\"t\":\"nativeProbe\",\"found\":%d,\"total\":%d,\"gta\":\"%s\",\"miss\":\"%s\"}",(int)found,(int)PROBE_N,g_ver[0]?g_ver:"?",miss[0]?miss:"none");
+    }
+    if(!own::active() && !noInvSent){
+        noInvSent=true;
+        logf("owninv: unavailable on first pass — ped-watch keeps probing every 5s (SHV invoke path is gone; natives no-op until the engine lights)");
+        sendJson("{\"t\":\"noInv\",\"gta\":\"%s\"}",g_ver[0]?g_ver:"?");
+    }
     while(g_running){wait(0);DWORD now=timeGetTime();
-        if(!g_localPed){static DWORD lt=0;if(now-lt>500){lt=now;pidx=Invoker(H_PLAYER_ID).reti();int p=Invoker(H_PPID).reti();if(p&&timeGetTime()-t0>8000){g_localPed=p;g_shvReady=true;logf("SHV READY: playerIdx=%d ped=0x%X (uptime=%ums) netPeds=%d",pidx,p,(unsigned)(timeGetTime()-t0),g_netPedCount);strcpy_s(g_f.err,"Scanning mem for ped...");sendJson("{\"t\":\"ready\",\"ped\":%d,\"uptime\":%lu}",p,(unsigned long)(timeGetTime()-t0));if(g_gta&&IsWindow(g_gta)){SetForegroundWindow(g_gta);logf("brought GTA window to front");}}else{static DWORD ll=0;if(now-ll>3000){ll=now;logf("SHV: waiting for ped... t=%ums p=%d",(unsigned)(timeGetTime()-t0),p);}}}continue;}
+        if(!g_localPed){
+        // v2.2.2 — if the engine is still dark, keep probing (the table may appear once the
+        // world finishes loading) and every 10s tell the feed WHERE we are so a dead engine
+        // is never silent again.
+        if(own::state()==0 && now-ownRetryAt>5000){ ownRetryAt=now; own::init(g_base,(uint32_t)g_size);
+            if(own::active() && !ownAnnounced){ ownAnnounced=true; logf("owninv: ACTIVE (late) — %d natives",own::natives());
+                sendJson("{\"t\":\"nativeScan\",\"own\":1,\"natives\":%d,\"gta\":\"%s\"}",own::natives(),g_ver[0]?g_ver:"?"); ownProbed=false; } }
+        if(own::active() && !ownProbed){ ownProbed=true; int found=0,missN=0; char miss[96]={0};
+            for(size_t pi=0; pi<PROBE_N; pi++){ if(own::resolve(g_probeHashes[pi].h))found++; else if(missN<4){ if(miss[0])strcat_s(miss,sizeof(miss),","); strcat_s(miss,sizeof(miss),g_probeHashes[pi].name); missN++; logf("owninv: PROBE MISS %s",g_probeHashes[pi].name); } }
+            logf("owninv: PROBE(late) %d/%d resolved",found,(int)PROBE_N);
+            sendJson("{\"t\":\"nativeProbe\",\"found\":%d,\"total\":%d,\"gta\":\"%s\",\"miss\":\"%s\"}",found,(int)PROBE_N,g_ver[0]?g_ver:"?",miss[0]?miss:"none"); }
+        {static DWORD pedWaitLog=0; if(now-t0>15000 && now-pedWaitLog>10000){ pedWaitLog=now;
+            int rp=own::resolve(0x4F8644AF03D0E0D6ULL)?1:0, rp2=own::resolve(0xD80958FC74E988A6ULL)?1:0;
+            logf("pedWAIT: up=%lus own=%d PLAYER_ID resolved=%d PLAYER_PED_ID resolved=%d",(unsigned long)((now-t0)/1000),(int)own::active(),rp,rp2);
+            sendJson("{\"t\":\"pedWait\",\"up\":%lu,\"own\":%d,\"pid\":%d,\"ppid\":%d}",(unsigned long)((now-t0)/1000),(int)own::active(),rp,rp2); }}
+        static DWORD lt=0;if(now-lt>500){lt=now;pidx=Invoker(H_PLAYER_ID).reti();int p=Invoker(H_PPID).reti();if(p&&timeGetTime()-t0>8000){g_localPed=p;g_shvReady=true;logf("SHV READY: playerIdx=%d ped=0x%X (uptime=%ums) netPeds=%d",pidx,p,(unsigned)(timeGetTime()-t0),g_netPedCount);strcpy_s(g_f.err,"Scanning mem for ped...");sendJson("{\"t\":\"ready\",\"ped\":%d,\"uptime\":%lu}",p,(unsigned long)(timeGetTime()-t0));if(g_gta&&IsWindow(g_gta)){SetForegroundWindow(g_gta);logf("brought GTA window to front");}}else{static DWORD ll=0;if(now-ll>3000){ll=now;logf("SHV: waiting for ped... t=%ums p=%d",(unsigned)(timeGetTime()-t0),p);}}}continue;}
         // Apply remote-ped movement every tick (smooth)
         if(now-lastNetTick>16){lastNetTick=now;processNetPeds(now);tickLocalTestBot_SHV(now);}
         // v1.9.0: incoming damage from remote players (armour soaks first, GTA semantics)
@@ -1002,9 +1066,9 @@ static LRESULT CALLBACK wndProc(HWND w,UINT m,WPARAM a,LPARAM b){
             if(shv::loaded()){
                 COLORREF c=g_shvReady?RGB(120,220,120):RGB(255,200,80);
                 snprintf(ln,sizeof(ln),"natives: %s  script=%s  spawns=%d  remotePeds=%d",
-                    own::active()?"GTAMP-OWN (no SHV DB)":(own::state()<0?"ScriptHookV (fallback)":"probing"),
+                    own::active()?"GTAMP-OWN":"probing… (no engine yet)",
                     g_shvReady?"ready":"starting",g_shvSpawnCount,g_netPedCount);
-                ovText(dc,fS,20,64,ln,own::active()?RGB(120,220,255):c);
+                ovText(dc,fS,20,64,ln,own::active()?RGB(120,220,255):RGB(255,170,90));
             } else ovText(dc,fS,20,64,"ScriptHookV.dll NOT FOUND",RGB(255,160,80));
             if(g_shvReady&&g_f.found){
                 snprintf(ln,sizeof(ln),"pos: %.1f,%.1f,%.1f  h=%.1f  bridge: %s",g_shvLastPedCoords.x,g_shvLastPedCoords.y,g_shvLastPedCoords.z,g_shvLastHeading,g_sock!=INVALID_SOCKET?"connected":"waiting");

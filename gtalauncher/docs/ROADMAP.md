@@ -41,6 +41,14 @@
 - **T chat** in-game (FiveM keybinding); F9 toggles the debug HUD.
 - **Tray/background**: GTAMP keeps running in the tray while you play; quitting GTA returns you to the launcher; `disconnectSession` cleans the session from console/launcher.
 
+## v2.2.2 — the engine proves itself out loud
+Field report at v2.2.1: no more fatal dialogs, but nothing spawned either — and the failure was silent (the own-engine scan result was only visible mid-flow).
+- **Up-front native probe**: the moment the own engine lights, the hook resolves its entire 52-native working set and reports `nativeProbe {found,total,miss:[names],gta}` to the launcher feed before touching the game. Any miss is NAMED ("missing: CREATE_PED") instead of invisible.
+- **Ped-watch telemetry**: engine live but GTA not answering `PLAYER_ID`/`PLAYER_PED_ID` within ~15 s → `pedWait` pings the feed every 10 s with the resolve status of exactly those two natives. A dead engine can no longer masquerade as a connected session.
+- **Persistent probing**: the own-engine scan no longer goes permanently dark after the first window — if the table wasn't populated yet (mid-load), the ped-watch re-probes every 5 s until it appears.
+- **Honest HUD**: the in-game status line shows `natives: GTAMP-OWN` vs `probing… (no engine yet)` (the SHV-fallback label was a lie after v2.2.1 removed it).
+- Diag-of-record stays `%TEMP%\gtamp_hook.log` (probe lines name every miss).
+
 ## v2.2.1 — the stale in-game hook and the SHV fallback are dead
 Field report at v2.2.0: the same SHV FATAL dialog resurfaced. Root cause: **Windows never reloads a same-path DLL inside a still-running GTA** — the old v2.1.x hook stayed resident in the user's GTA process, so re-injecting did nothing and the old fiber kept dying on their ScriptHookV.
 - **Versioned hook staging**: the launcher now copies `gtamp_hook.dll` to `%TEMP%\gtamp-native\v<ver>\` before injection, so a new build can physically enter an already-hooked GTA.

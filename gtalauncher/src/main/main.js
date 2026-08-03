@@ -407,6 +407,16 @@ function ensureHookTcpServer() {
             // v2.2.1 — own engine could not map this build; hook fiber alive, natives no-op
             writeLaunchDiag(['HOOK: no native engine — GTA build ' + (m.gta || '?') + ' not mappable (needs a GTAMP update)']);
             if (connectCtl) { connectCtl.noInvGta = String(m.gta || '?'); connectCtl.event('noInv'); }
+          } else if (m.t === 'nativeProbe') {
+            // v2.2.2 — the hook resolved its whole native set up front; this names any misses
+            const okAll = (m.found === m.total) && m.found > 0;
+            writeLaunchDiag(['NATIVE PROBE: ' + (m.found || 0) + '/' + (m.total || 0) + ' resolved on GTA ' + (m.gta || '?') + (okAll ? ' — engine VERIFIED' : (' — missing: ' + (m.miss || '?') + ' (this is why nothing spawns; paste diagnostics)'))]);
+          } else if (m.t === 'pedWait') {
+            // v2.2.2 — engine live but GTA still hasn't answered PLAYER_ID/PLAYER_PED_ID
+            if (!connectCtl || !connectCtl._lastPedWait || Date.now() - connectCtl._lastPedWait > 15000) {
+              if (connectCtl) connectCtl._lastPedWait = Date.now();
+              writeLaunchDiag(['WAITING ON GTA: engine=' + (m.own ? 'on' : 'OFF') + ' PLAYER_ID=' + (m.pid ? 'resolved' : 'UNRESOLVED') + ' PLAYER_PED_ID=' + (m.ppid ? 'resolved' : 'UNRESOLVED') + ' (up ' + (m.up || 0) + 's) — if this repeats, paste diagnostics']);
+            }
           } else if (m.t === 'ready') {
             writeLaunchDiag(['hook SHV ready ped=' + m.ped]);
             if (connectCtl) connectCtl.event('hookReady');
@@ -840,7 +850,7 @@ function verifyGtaOwnership(dir) {
 }
 
 // ---------- Loading window: startup splash + server connect (v1.7.0) ----------
-const LAUNCHER_VER = '2.2.1';
+const LAUNCHER_VER = '2.2.2';
 function openLoading(mode, opts = {}) {
   closeLoading();
   loadingWin = new BrowserWindow({
